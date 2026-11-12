@@ -15,17 +15,18 @@
 package fileblob
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -35,21 +36,31 @@ import (
 	"gocloud.dev/gcerrors"
 )
 
+func closeWithErrorCheck(t testing.TB, c io.Closer) {
+	t.Helper()
+	if err := c.Close(); err != nil {
+		t.Errorf("failed to close: %v", err)
+	}
+}
+
 type harness struct {
 	dir         string
 	prefix      string
 	metadataHow metadataOption
+	noTempDir   bool
 	server      *httptest.Server
 	urlSigner   URLSigner
 	closer      func()
 }
 
-func newHarness(ctx context.Context, t *testing.T, prefix string, metadataHow metadataOption) (drivertest.Harness, error) {
+func newHarness(ctx context.Context, t *testing.T, prefix string, metadataHow metadataOption, noTempDir bool) (drivertest.Harness, error) {
+	t.Helper()
+
 	if metadataHow == MetadataDontWrite {
 		// Skip tests for if no metadata gets written.
 		// For these it is currently undefined whether any gets read (back).
 		switch name := t.Name(); {
-		case strings.HasSuffix(name, "TestAttributes"), strings.Contains(name, "TestMetadata/"):
+		case strings.Contains(name, "ContentType"), strings.HasSuffix(name, "TestAttributes"), strings.Contains(name, "TestMetadata/"):
 			t.SkipNow()
 			return nil, nil
 		}
@@ -64,7 +75,7 @@ func newHarness(ctx context.Context, t *testing.T, prefix string, metadataHow me
 			return nil, err
 		}
 	}
-	h := &harness{dir: dir, prefix: prefix, metadataHow: metadataHow}
+	h := &harness{dir: dir, prefix: prefix, metadataHow: metadataHow, noTempDir: noTempDir}
 
 	localServer := httptest.NewServer(http.HandlerFunc(h.serveSignedURL))
 	h.server = localServer
@@ -106,7 +117,7 @@ func (h *harness) serveSignedURL(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	defer bucket.Close()
+	defer func() { _ = bucket.Close() }()
 
 	switch r.Method {
 	case http.MethodGet:
@@ -115,8 +126,11 @@ func (h *harness) serveSignedURL(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		defer reader.Close()
-		io.Copy(w, reader)
+		defer func() { _ = reader.Close() }()
+		if _, err := io.Copy(w, reader); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 	case http.MethodPut:
 		writer, err := bucket.NewWriter(r.Context(), objKey, &blob.WriterOptions{
 			ContentType: contentType,
@@ -125,7 +139,10 @@ func (h *harness) serveSignedURL(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		io.Copy(writer, r.Body)
+		if _, err := io.Copy(writer, r.Body); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		if err := writer.Close(); err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
@@ -148,6 +165,7 @@ func (h *harness) MakeDriver(ctx context.Context) (driver.Bucket, error) {
 	opts := &Options{
 		URLSigner: h.urlSigner,
 		Metadata:  h.metadataHow,
+		NoTempDir: h.noTempDir,
 	}
 	drv, err := openBucket(h.dir, opts)
 	if err != nil {
@@ -165,28 +183,47 @@ func (h *harness) MakeDriverForNonexistentBucket(ctx context.Context) (driver.Bu
 	return nil, nil
 }
 
+func (*harness) SupportsCopy() bool               { return true }
+func (*harness) SupportsNonSlashDelimiters() bool { return true }
+func (*harness) SkipDownloadAt() bool             { return false }
+
 func (h *harness) Close() {
 	h.closer()
 }
 
 func TestConformance(t *testing.T) {
 	newHarnessNoPrefix := func(ctx context.Context, t *testing.T) (drivertest.Harness, error) {
-		return newHarness(ctx, t, "", MetadataInSidecar)
+		t.Helper()
+
+		return newHarness(ctx, t, "", MetadataInSidecar, false)
 	}
 	drivertest.RunConformanceTests(t, newHarnessNoPrefix, []drivertest.AsTest{verifyAs{}})
+}
+
+func TestConformanceNoTempDir(t *testing.T) {
+	newHarnessNoTmpDir := func(ctx context.Context, t *testing.T) (drivertest.Harness, error) {
+		t.Helper()
+
+		return newHarness(ctx, t, "", MetadataInSidecar, true)
+	}
+	drivertest.RunConformanceTests(t, newHarnessNoTmpDir, []drivertest.AsTest{verifyAs{}})
 }
 
 func TestConformanceWithPrefix(t *testing.T) {
 	const prefix = "some/prefix/dir/"
 	newHarnessWithPrefix := func(ctx context.Context, t *testing.T) (drivertest.Harness, error) {
-		return newHarness(ctx, t, prefix, MetadataInSidecar)
+		t.Helper()
+
+		return newHarness(ctx, t, prefix, MetadataInSidecar, false)
 	}
 	drivertest.RunConformanceTests(t, newHarnessWithPrefix, []drivertest.AsTest{verifyAs{prefix: prefix}})
 }
 
 func TestConformanceSkipMetadata(t *testing.T) {
 	newHarnessSkipMetadata := func(ctx context.Context, t *testing.T) (drivertest.Harness, error) {
-		return newHarness(ctx, t, "", MetadataDontWrite)
+		t.Helper()
+
+		return newHarness(ctx, t, "", MetadataDontWrite, false)
 	}
 	drivertest.RunConformanceTests(t, newHarnessSkipMetadata, []drivertest.AsTest{verifyAs{}})
 }
@@ -206,27 +243,21 @@ func BenchmarkFileblob(b *testing.B) {
 // File-specific unit tests.
 func TestNewBucket(t *testing.T) {
 	t.Run("BucketDirMissing", func(t *testing.T) {
-		dir, err := ioutil.TempDir("", "fileblob")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer os.RemoveAll(dir)
+		dir := t.TempDir()
+
 		_, gotErr := OpenBucket(filepath.Join(dir, "notfound"), nil)
 		if gotErr == nil {
 			t.Errorf("got nil want error")
 		}
 	})
 	t.Run("BucketDirMissingWithCreateDir", func(t *testing.T) {
-		dir, err := ioutil.TempDir("", "fileblob")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer os.RemoveAll(dir)
+		dir := t.TempDir()
+
 		b, gotErr := OpenBucket(filepath.Join(dir, "notfound"), &Options{CreateDir: true})
 		if gotErr != nil {
 			t.Errorf("got error %v", gotErr)
 		}
-		defer b.Close()
+		defer closeWithErrorCheck(t, b)
 
 		// Make sure the subdir has gotten permissions to be used.
 		gotErr = b.WriteAll(context.Background(), "key", []byte("delme"), nil)
@@ -235,11 +266,12 @@ func TestNewBucket(t *testing.T) {
 		}
 	})
 	t.Run("BucketIsFile", func(t *testing.T) {
-		f, err := ioutil.TempFile("", "fileblob")
+		dir := t.TempDir()
+
+		f, err := os.CreateTemp(dir, "fileblob")
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer os.Remove(f.Name())
 		_, gotErr := OpenBucket(f.Name(), nil)
 		if gotErr == nil {
 			t.Errorf("got nil want error")
@@ -247,17 +279,82 @@ func TestNewBucket(t *testing.T) {
 	})
 }
 
-func TestSignedURLReturnsUnimplementedWithNoURLSigner(t *testing.T) {
-	dir, err := ioutil.TempDir("", "fileblob")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir)
+func TestIfNotExistHasNoSideEffects(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	const (
+		key          = "key"
+		origContents = "hello world"
+	)
+
 	b, err := OpenBucket(dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer b.Close()
+	defer closeWithErrorCheck(t, b)
+	if err := b.WriteAll(ctx, key, []byte(origContents), &blob.WriterOptions{
+		Metadata: map[string]string{"md": "a"}}); err != nil {
+		t.Fatalf("failed to write blob: %v", err)
+	}
+	if err := b.WriteAll(ctx, key, []byte("goodbye world"), &blob.WriterOptions{
+		IfNotExist: true,
+		Metadata:   map[string]string{"md": "b"}}); err == nil || !errors.Is(err, gcerrors.ErrFailedPrecondition) {
+		t.Fatalf("expected FailedPrecondition error, got %v", err)
+	}
+	if got, err := b.ReadAll(ctx, key); err != nil {
+		t.Errorf("failed to read blob: %v", err)
+	} else if string(got) != origContents {
+		t.Errorf("expected to read original contents, got %q", string(got))
+	}
+	if attrs, err := b.Attributes(ctx, key); err != nil {
+		t.Errorf("failed to get attributes for blob: %v", err)
+	} else if attrs.Metadata["md"] != "a" {
+		t.Errorf("expected metadata to be unchanged, got %v", attrs.Metadata)
+	}
+}
+
+func TestBeforeWriteErrorRemovesTempFile(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	beforeWriteErr := errors.New("before write failed")
+
+	b, err := OpenBucket(dir, &Options{NoTempDir: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeWithErrorCheck(t, b)
+
+	var tempName string
+	_, gotErr := b.NewWriter(ctx, "key", &blob.WriterOptions{
+		ContentType: "text/plain",
+		BeforeWrite: func(as func(any) bool) error {
+			var f *os.File
+			if !as(&f) {
+				t.Fatal("BeforeWrite.As failed")
+			}
+			tempName = f.Name()
+			return beforeWriteErr
+		},
+	})
+	if !errors.Is(gotErr, beforeWriteErr) {
+		t.Fatalf("got error %v, want %v", gotErr, beforeWriteErr)
+	}
+	if tempName == "" {
+		t.Fatal("BeforeWrite was not called")
+	}
+	if _, err := os.Stat(tempName); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temp file exists after BeforeWrite error: %v", err)
+	}
+}
+
+func TestSignedURLReturnsUnimplementedWithNoURLSigner(t *testing.T) {
+	dir := t.TempDir()
+
+	b, err := OpenBucket(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeWithErrorCheck(t, b)
 	_, gotErr := b.SignedURL(context.Background(), "key", nil)
 	if gcerrors.Code(gotErr) != gcerrors.Unimplemented {
 		t.Errorf("want Unimplemented error, got %v", gotErr)
@@ -277,29 +374,33 @@ func (verifyAs) BucketCheck(b *blob.Bucket) error {
 	}
 	return nil
 }
-func (verifyAs) BeforeRead(as func(interface{}) bool) error {
+
+func (verifyAs) BeforeRead(as func(any) bool) error {
 	var f *os.File
 	if !as(&f) {
 		return errors.New("BeforeRead.As failed")
 	}
 	return nil
 }
-func (verifyAs) BeforeWrite(as func(interface{}) bool) error {
+
+func (verifyAs) BeforeWrite(as func(any) bool) error {
 	var f *os.File
 	if !as(&f) {
 		return errors.New("BeforeWrite.As failed")
 	}
 	return nil
 }
-func (verifyAs) BeforeCopy(as func(interface{}) bool) error {
+
+func (verifyAs) BeforeCopy(as func(any) bool) error {
 	var f *os.File
 	if !as(&f) {
 		return errors.New("BeforeCopy.As failed")
 	}
 	return nil
 }
-func (verifyAs) BeforeList(as func(interface{}) bool) error { return nil }
-func (verifyAs) BeforeSign(as func(interface{}) bool) error { return nil }
+func (verifyAs) BeforeDelete(as func(any) bool) error { return nil }
+func (verifyAs) BeforeList(as func(any) bool) error   { return nil }
+func (verifyAs) BeforeSign(as func(any) bool) error   { return nil }
 func (verifyAs) AttributesCheck(attrs *blob.Attributes) error {
 	var fi os.FileInfo
 	if !attrs.As(&fi) {
@@ -307,6 +408,7 @@ func (verifyAs) AttributesCheck(attrs *blob.Attributes) error {
 	}
 	return nil
 }
+
 func (verifyAs) ReaderCheck(r *blob.Reader) error {
 	var ior io.Reader
 	if !r.As(&ior) {
@@ -314,6 +416,7 @@ func (verifyAs) ReaderCheck(r *blob.Reader) error {
 	}
 	return nil
 }
+
 func (verifyAs) ListObjectCheck(o *blob.ListObject) error {
 	var fi os.FileInfo
 	if !o.As(&fi) {
@@ -326,6 +429,9 @@ func (v verifyAs) ErrorCheck(b *blob.Bucket, err error) error {
 	var perr *os.PathError
 	if !b.ErrorAs(err, &perr) {
 		return errors.New("want ErrorAs to succeed for PathError")
+	}
+	if !errors.As(err, &perr) {
+		return errors.New("want errors.As to succeed for PathError")
 	}
 	wantSuffix := filepath.Join("go-cloud-fileblob", v.prefix, "key-does-not-exist")
 	if got := perr.Path; !strings.HasSuffix(got, wantSuffix) {
@@ -343,15 +449,15 @@ func TestOpenBucketFromURL(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, subdir), os.ModePerm); err != nil {
 		t.Fatal(err)
 	}
-	if err := ioutil.WriteFile(filepath.Join(dir, "myfile.txt"), []byte("hello world"), 0666); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "myfile.txt"), []byte("hello world"), 0o666); err != nil {
 		t.Fatal(err)
 	}
 	// To avoid making another temp dir, use the bucket directory to hold the secret key file.
 	secretKeyPath := filepath.Join(dir, "secret.key")
-	if err := ioutil.WriteFile(secretKeyPath, []byte("secret key"), 0666); err != nil {
+	if err := os.WriteFile(secretKeyPath, []byte("secret key"), 0o666); err != nil {
 		t.Fatal(err)
 	}
-	if err := ioutil.WriteFile(filepath.Join(dir, subdir, "myfileinsubdir.txt"), []byte("hello world in subdir"), 0666); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, subdir, "myfileinsubdir.txt"), []byte("hello world in subdir"), 0o666); err != nil {
 		t.Fatal(err)
 	}
 	// Convert dir to a URL path, adding a leading "/" if needed on Windows.
@@ -375,6 +481,8 @@ func TestOpenBucketFromURL(t *testing.T) {
 		{"file://./../..", "filenotfound.txt", false, true, ""},
 		// OK.
 		{"file://" + dirpath, "myfile.txt", false, false, "hello world"},
+		// OK, with no_tmp_dir.
+		{"file://" + dirpath + "?no_tmp_dir", "myfile.txt", false, false, "hello world"},
 		// OK, host is ignored.
 		{"file://localhost" + dirpath, "myfile.txt", false, false, "hello world"},
 		// OK, with prefix.
@@ -383,6 +491,12 @@ func TestOpenBucketFromURL(t *testing.T) {
 		{"file://" + dirpath + "subdir", "", true, false, ""},
 		// Subdir does not exist, but create_dir creates it. Error is at file read time.
 		{"file://" + dirpath + "subdir2?create_dir=true", "filenotfound.txt", false, true, ""},
+		// Invalid dir_file_mode.
+		{"file://" + dirpath + "subdir?dir_file_mode=x", "myfile.txt", true, false, ""},
+		// Another invalid dir_file_mode.
+		{"file://" + dirpath + "subdir?dir_file_mode=-1", "myfile.txt", true, false, ""},
+		// Valid dir_file_mode.
+		{"file://" + dirpath + "subdir3?dir_file_mode=666&create_dir=true", "filenotfound.txt", false, true, ""},
 		// Invalid query parameter.
 		{"file://" + dirpath + "?param=value", "myfile.txt", true, false, ""},
 		// Unrecognized value for parameter "metadata".
@@ -410,7 +524,7 @@ func TestOpenBucketFromURL(t *testing.T) {
 	for i, test := range tests {
 		b, err := blob.OpenBucket(ctx, test.URL)
 		if b != nil {
-			defer b.Close()
+			defer closeWithErrorCheck(t, b)
 		}
 		if (err != nil) != test.WantErr {
 			t.Errorf("#%d: %s: got error %v, want error %v", i, test.URL, err, test.WantErr)
@@ -431,7 +545,62 @@ func TestOpenBucketFromURL(t *testing.T) {
 	}
 }
 
-func TestListAtRoot(t *testing.T) {
+func TestDirFileModeFromURL(t *testing.T) {
+	ctx := context.Background()
+	o := &URLOpener{}
+	tests := []struct {
+		query string
+		want  os.FileMode
+	}{
+		// Octal notation with a leading "0" is the conventional way to write a
+		// file mode, and is what the documented default (0777) looks like.
+		{"dir_file_mode=0777", os.FileMode(0o777)},
+		{"dir_file_mode=0755", os.FileMode(0o755)},
+		{"dir_file_mode=0700", os.FileMode(0o700)},
+		// "0o" prefix is also octal.
+		{"dir_file_mode=0o644", os.FileMode(0o644)},
+		// No prefix is decimal, preserving the previous behavior.
+		{"dir_file_mode=511", os.FileMode(511)}, // nolint
+	}
+	for _, test := range tests {
+		q, err := url.ParseQuery(test.query)
+		if err != nil {
+			t.Fatalf("%s: %v", test.query, err)
+		}
+		opts, err := o.forParams(ctx, q)
+		if err != nil {
+			t.Errorf("%s: got error %v, want nil", test.query, err)
+			continue
+		}
+		if opts.DirFileMode != test.want {
+			t.Errorf("%s: got DirFileMode %v (%#o), want %v (%#o)", test.query, opts.DirFileMode, opts.DirFileMode, test.want, test.want)
+		}
+	}
+}
+
+func TestEscapeBucketRootWithListPrefix(t *testing.T) {
+	ctx := context.Background()
+	tdir := t.TempDir()
+	dir := filepath.Join(tdir, "go-cloud-fileblob")
+	if err := os.MkdirAll(dir, os.ModePerm); err != nil {
+		t.Fatal(err)
+	}
+	b, err := OpenBucket(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeWithErrorCheck(t, b)
+
+	it := b.List(&blob.ListOptions{
+		Prefix: "../",
+	})
+	_, err = it.Next(ctx)
+	if err == nil || err == io.EOF || !strings.Contains(err.Error(), "escapes bucket root") {
+		t.Fatalf("Got no error or unexpected error when trying to escape bucket root via List (got %v)", err)
+	}
+}
+
+func TestEscapeBucketRootAtRoot(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("/ as root is a unix concept")
 	}
@@ -441,17 +610,17 @@ func TestListAtRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Got error creating bucket; %#v", err)
 	}
-	defer b.Close()
+	defer closeWithErrorCheck(t, b)
 
-	dir, err := ioutil.TempDir("", "fileblob")
+	dir := t.TempDir()
+
+	testFileKey := filepath.Join(dir, "file.txt")
+	err = b.WriteAll(ctx, testFileKey, []byte("hello world"), &blob.WriterOptions{
+		ContentType: "text/plain",
+	})
 	if err != nil {
-		t.Fatalf("Got error creating temp dir: %#v", err)
+		t.Fatal(err)
 	}
-	f, err := os.Create(filepath.Join(dir, "file.txt"))
-	if err != nil {
-		t.Fatalf("Got error creating file: %#v", err)
-	}
-	defer f.Close()
 
 	it := b.List(&blob.ListOptions{
 		Prefix: dir[1:],
@@ -469,12 +638,102 @@ func TestListAtRoot(t *testing.T) {
 	}
 }
 
-func TestSkipMetadata(t *testing.T) {
-	dir, err := ioutil.TempDir("", "fileblob*")
-	if err != nil {
-		t.Fatalf("Got error creating temp dir: %#v", err)
+func TestEscapeFile(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(os.TempDir(), "go-cloud-fileblob-escapefile")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
 	}
-	defer os.RemoveAll(dir)
+	victim := dir + ".attrs" // OUTSIDE the bucket
+	const victimData = "IMPORTANT DATA"
+	if err := os.WriteFile(victim, []byte(victimData), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := OpenBucket(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeWithErrorCheck(t, b)
+
+	// .. is explicitly out-of-bucket.
+	// a/.. resolves to the bucket itself.
+	for _, key := range []string{"..", "a/.."} {
+		// Try both a Delete and a Write.
+		if err = b.WriteAll(ctx, key, []byte("OUT-OF-BUCKET-WRITE"), nil); err == nil {
+			t.Errorf("wanted error from WriteAll to %q, got nil", key)
+		}
+		if err = b.Delete(ctx, key); err == nil {
+			t.Errorf("wanted error from Delete of %q, got nil", key)
+		}
+		// Make sure the bucket and victim weren't deleted or overwitten.
+		if _, err := os.Stat(dir); err != nil {
+			t.Errorf("bucket was deleted by Delete of %q", key)
+		}
+		if _, err := os.Stat(victim); err != nil {
+			t.Errorf("out-of-bucket victim was deleted by Delete of %q", key)
+		}
+		if got, err := os.ReadFile(victim); err != nil {
+			t.Errorf("couldn't read out-of-bucket victim after WriteAll to %q: %v", key, err)
+		} else if string(got) != victimData {
+			t.Errorf("out-of-bucket victim was overwritten by write to %q, new content is %q", key, string(got))
+		}
+	}
+}
+
+func TestMd5SpoofInList(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(os.TempDir(), "go-cloud-fileblob-spoofmd5")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const victimKey = "victim"
+
+	cwd, err := os.MkdirTemp("", "gocdk-cwd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatal(err)
+	}
+
+	// Plant a spoofed attrs file at a CWD-relative path matching the key.
+	if err := os.WriteFile(filepath.Join(cwd, victimKey+".attrs"), []byte(`{"user.content_type":"text/spoofed","md5":"3q2+7w=="}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := OpenBucket(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeWithErrorCheck(t, b)
+
+	if err := b.WriteAll(ctx, victimKey, []byte("real content"), nil); err != nil {
+		t.Fatalf("failed during write: %v", err)
+	}
+
+	var md5FromList []byte
+	it := b.List(&blob.ListOptions{})
+	for {
+		o, err := it.Next(ctx)
+		if err != nil {
+			break
+		}
+		md5FromList = o.MD5
+	}
+	a, err := b.Attributes(ctx, victimKey)
+	if err != nil {
+		t.Errorf("failed to get Attributes: %v", err)
+	}
+	md5FromAttributes := a.MD5
+	if !bytes.Equal(md5FromList, md5FromAttributes) {
+		t.Error("md5 from List and from Attributes didn't match")
+	}
+}
+
+func TestSkipMetadata(t *testing.T) {
+	dir := t.TempDir()
+
 	dirpath := filepath.ToSlash(dir)
 	if os.PathSeparator != '/' && !strings.HasPrefix(dirpath, "/") {
 		dirpath = "/" + dirpath
@@ -489,12 +748,11 @@ func TestSkipMetadata(t *testing.T) {
 		{"file://" + dirpath + "?metadata=", true}, // … and explicitly.
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	for _, test := range tests {
 		b, err := blob.OpenBucket(ctx, test.URL)
 		if b != nil {
-			defer b.Close()
+			defer closeWithErrorCheck(t, b)
 		}
 		if err != nil {
 			t.Fatal(err)
@@ -512,6 +770,71 @@ func TestSkipMetadata(t *testing.T) {
 			t.Errorf("Metadata sidecar file (extension %s) exists: %v, did we want it: %v",
 				attrsExt, gotSidecar, test.wantSidecar)
 		}
-		b.Delete(ctx, "key")
+		if err := b.Delete(ctx, "key"); err != nil {
+			t.Errorf("failed to delete: %v", err)
+		}
+	}
+}
+
+// TestListPagedSortsBeforeDirectory checks that paging doesn't skip keys when a
+// file sorts before the "directory" key generated for its sibling directory.
+// For example, "dir-file" sorts before "dir/" because '-' < '/', but the walk
+// visits "dir/" first, so the file can show up after the page is already full.
+func TestListPagedSortsBeforeDirectory(t *testing.T) {
+	tests := []struct {
+		name string
+		keys []string
+	}{
+		{"one sibling", []string{"dir/a", "dir/b", "dir-file", "f"}},
+		{"several siblings", []string{"a/b", "a-c", "a-d"}},
+		{"nested", []string{"x/y/z", "x-w", "x-v"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			b, err := OpenBucket(t.TempDir(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer closeWithErrorCheck(t, b)
+			for _, key := range test.keys {
+				if err := b.WriteAll(ctx, key, []byte("hello"), nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			opts := &blob.ListOptions{Delimiter: "/"}
+
+			// An unpaged list gives the keys in the order they should appear.
+			var want []string
+			iter := b.List(opts)
+			for {
+				obj, err := iter.Next(ctx)
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				want = append(want, obj.Key)
+			}
+
+			// Paging must not change the set of keys, or their order.
+			for pageSize := 1; pageSize <= len(test.keys); pageSize++ {
+				var got []string
+				for token := blob.FirstPageToken; token != nil; {
+					objs, next, err := b.ListPage(ctx, token, pageSize, opts)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, obj := range objs {
+						got = append(got, obj.Key)
+					}
+					token = next
+				}
+				if !slices.Equal(got, want) {
+					t.Errorf("pageSize %d: got %v, want %v", pageSize, got, want)
+				}
+			}
+		})
 	}
 }

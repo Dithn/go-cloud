@@ -15,12 +15,14 @@
 // Package gcsblob provides a blob implementation that uses GCS. Use OpenBucket
 // to construct a *blob.Bucket.
 //
-// URLs
+// # URLs
 //
 // For blob.OpenBucket, gcsblob registers for the scheme "gs".
 // The default URL opener will set up a connection using default credentials
 // from the environment, as described in
 // https://cloud.google.com/docs/authentication/production.
+// You may force the use of an unauthenticated client by setting
+// GoogleAccessID to "-" (via Options or via the URL parameter "access_id").
 // Some environments, such as GCE, come without a private key. In such cases
 // the IAM Credentials API will be configured for use in Options.MakeSignBytes,
 // which will introduce latency to any and all calls to bucket.SignedURL
@@ -32,27 +34,28 @@
 // see URLOpener.
 // See https://gocloud.dev/concepts/urls/ for background information.
 //
-// Escaping
+// # Escaping
 //
 // Go CDK supports all UTF-8 strings; to make this work with services lacking
 // full UTF-8 support, strings must be escaped (during writes) and unescaped
 // (during reads). The following escapes are performed for gcsblob:
-//  - Blob keys: ASCII characters 10 and 13 are escaped to "__0x<hex>__".
-//    Additionally, the "/" in "../" is escaped in the same way.
+//   - Blob keys: ASCII characters 10 and 13 are escaped to "__0x<hex>__".
+//     Additionally, the "/" in "../" is escaped in the same way.
 //
-// As
+// # As
 //
 // gcsblob exposes the following types for As:
-//  - Bucket: *storage.Client
-//  - Error: *googleapi.Error
-//  - ListObject: storage.ObjectAttrs
-//  - ListOptions.BeforeList: *storage.Query
-//  - Reader: *storage.Reader
-//  - ReaderOptions.BeforeRead: **storage.ObjectHandle, *storage.Reader (if accessing both, must be in that order)
-//  - Attributes: storage.ObjectAttrs
-//  - CopyOptions.BeforeCopy: *CopyObjectHandles, *storage.Copier (if accessing both, must be in that order)
-//  - WriterOptions.BeforeWrite: **storage.ObjectHandle, *storage.Writer (if accessing both, must be in that order)
-//  - SignedURLOptions.BeforeSign: *storage.SignedURLOptions
+//   - Bucket: *storage.Client
+//   - Error: *googleapi.Error
+//   - ListObject: storage.ObjectAttrs
+//   - ListOptions.BeforeList: *storage.Query
+//   - Reader: *storage.Reader
+//   - ReaderOptions.BeforeRead: **storage.ObjectHandle, *storage.Reader (if accessing both, must be in that order)
+//   - DeleteOptions.BeforeDelete: **storage.ObjectHandle
+//   - Attributes: storage.ObjectAttrs
+//   - CopyOptions.BeforeCopy: *CopyObjectHandles, *storage.Copier (if accessing both, must be in that order)
+//   - WriterOptions.BeforeWrite: **storage.ObjectHandle, *storage.Writer (if accessing both, must be in that order)
+//   - SignedURLOptions.BeforeSign: *storage.SignedURLOptions
 package gcsblob // import "gocloud.dev/blob/gcsblob"
 
 import (
@@ -61,17 +64,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"cloud.google.com/go/compute/metadata"
 	"cloud.google.com/go/storage"
+	"cloud.google.com/go/storage/transfermanager"
 	"github.com/google/wire"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/googleapi"
@@ -127,7 +131,7 @@ func readDefaultCredentials(credFileAsJSON []byte) (AccessID string, PrivateKey 
 	}
 	if err := json.Unmarshal(credFileAsJSON, &contentVariantB); err == nil {
 		nextFieldIsAccessID := false
-		for _, s := range strings.Split(contentVariantB.Name, "/") {
+		for s := range strings.SplitSeq(contentVariantB.Name, "/") {
 			if nextFieldIsAccessID {
 				AccessID = s
 				break
@@ -140,32 +144,70 @@ func readDefaultCredentials(credFileAsJSON []byte) (AccessID string, PrivateKey 
 	return
 }
 
-// lazyCredsOpener obtains Application Default Credentials on the first call
-// to OpenBucketURL.
-type lazyCredsOpener struct {
-	init   sync.Once
+type openerOrError struct {
 	opener *URLOpener
 	err    error
 }
 
+// lazyCredsOpener obtains Application Default Credentials on the first call
+// to OpenBucketURL per universe_domain query parameter value.
+type lazyCredsOpener struct {
+	mutex   sync.Mutex
+	openers map[string]*openerOrError // per universe_domain query parameter value
+}
+
 func (o *lazyCredsOpener) OpenBucketURL(ctx context.Context, u *url.URL) (*blob.Bucket, error) {
-	o.init.Do(func() {
+	o.mutex.Lock()
+	defer o.mutex.Unlock()
+
+	if o.openers == nil {
+		o.openers = map[string]*openerOrError{}
+	}
+
+	// Check if universe_domain is specified in the URL query parameters.
+	// We'll cache a separate opener per domain.
+	universeDomain := u.Query().Get("universe_domain")
+	openerOrErr := o.openers[universeDomain]
+	var opener *URLOpener
+	var openerErr error
+	if openerOrErr != nil {
+		opener = openerOrErr.opener
+		openerErr = openerOrErr.err
+	} else {
+		// Cache miss.
 		var opts Options
 		var creds *google.Credentials
-		if os.Getenv("STORAGE_EMULATOR_HOST") != "" {
+		// STORAGE_EMULATOR_HOST_GRPC is the gRPC equivalent; a local emulator
+		// needs separate ports for HTTP and gRPC, so either may be set.
+		if os.Getenv("STORAGE_EMULATOR_HOST") != "" || os.Getenv("STORAGE_EMULATOR_HOST_GRPC") != "" {
 			creds, _ = google.CredentialsFromJSON(ctx, []byte(`{"type": "service_account", "project_id": "my-project-id"}`))
 		} else {
 			var err error
-			creds, err = gcp.DefaultCredentials(ctx)
+			if universeDomain != "" {
+				creds, err = gcp.DefaultCredentialsWithParams(ctx, google.CredentialsParams{
+					UniverseDomain: universeDomain,
+				})
+			} else {
+				creds, err = gcp.DefaultCredentials(ctx)
+			}
 			if err != nil {
-				o.err = err
-				return
+				fmt.Printf("Warning: unable to load GCP Default Credentials: %v", err)
+				// Use empty credentials, in case the user isn't going to actually use
+				// them; e.g., getting signed URLs with GoogleAccessID=-.
+				creds, _ = google.CredentialsFromJSON(ctx, []byte(`{"type": "service_account"}`))
 			}
 
 			// Populate default values from credentials files, where available.
 			opts.GoogleAccessID, opts.PrivateKey = readDefaultCredentials(creds.JSON)
 
-			// … else, on GCE, at least get the instance's main service account.
+			ud, err := creds.GetUniverseDomain()
+			if err != nil {
+				fmt.Printf("Warning: unable to load GCP Universe Domain: %v", err)
+			} else if ud != "" {
+				opts.ClientOptions = append(opts.ClientOptions, option.WithUniverseDomain(ud))
+			}
+
+			// ... else, on GCE, at least get the instance's main service account.
 			if opts.GoogleAccessID == "" && metadata.OnGCE() {
 				mc := metadata.NewClient(nil)
 				opts.GoogleAccessID, _ = mc.Email("")
@@ -181,16 +223,20 @@ func (o *lazyCredsOpener) OpenBucketURL(ctx context.Context, u *url.URL) (*blob.
 		}
 
 		client, err := gcp.NewHTTPClient(gcp.DefaultTransport(), creds.TokenSource)
-		if err != nil {
-			o.err = err
-			return
+		if err == nil {
+			// TokenSource is needed for grpc=true and zonal=true URLs, which build a
+			// separate gRPC client that cannot reuse the HTTP one.
+			opener = &URLOpener{Client: client, TokenSource: gcp.CredentialsTokenSource(creds), Options: opts}
+		} else {
+			openerErr = err
 		}
-		o.opener = &URLOpener{Client: client, Options: opts}
-	})
-	if o.err != nil {
-		return nil, fmt.Errorf("open bucket %v: %v", u, o.err)
+		// Update cache.
+		o.openers[universeDomain] = &openerOrError{opener, openerErr}
 	}
-	return o.opener.OpenBucketURL(ctx, u)
+	if openerErr != nil {
+		return nil, fmt.Errorf("open bucket %v: %w", u, openerErr)
+	}
+	return opener.OpenBucketURL(ctx, u)
 }
 
 // Scheme is the URL scheme gcsblob registers its URLOpener under on
@@ -203,14 +249,29 @@ const Scheme = "gs"
 //
 // The following query parameters are supported:
 //
-//   - access_id: sets Options.GoogleAccessID
-//   - private_key_path: path to read for Options.PrivateKey
+//   - anonymous: A value of "true" forces the use of an unauthenticated client.
+//   - access_id: Sets Options.GoogleAccessID; only used in SignedURL, except that
+//     a value of "-" forces the use of an unauthenticated client.
+//   - private_key_path: Path to read for Options.PrivateKey; only used in SignedURL.
+//   - universe_domain: Sets the universe domain for the client.
+//   - grpc: A value of "true" uses the Cloud Storage gRPC API instead of the
+//     JSON/HTTP API. The bucket is opened with a client from DialGRPC.
+//   - zonal: A value of "true" additionally enables the zonal bucket APIs, which
+//     are required for Rapid Storage buckets. Implies grpc=true.
 //
-// Currently their use is limited to SignedURL.
+// gRPC is not automatically faster than JSON/HTTP. For small-object latency
+// against regional, dual-region and multi-region buckets it measured no better,
+// so prefer the default unless you have measured a win for your workload.
 type URLOpener struct {
 	// Client must be set to a non-nil HTTP client authenticated with
-	// Cloud Storage scope or equivalent.
+	// Cloud Storage scope or equivalent (unless anonymous=true).
 	Client *gcp.HTTPClient
+
+	// TokenSource is used to authenticate the gRPC client built for URLs with
+	// grpc=true or zonal=true. The gRPC API cannot reuse an HTTP client, so
+	// Client is not enough on its own. It is not needed for URLs that use the
+	// default JSON/HTTP API, nor for anonymous=true.
+	TokenSource gcp.TokenSource
 
 	// Options specifies the default options to pass to OpenBucket.
 	Options Options
@@ -218,32 +279,113 @@ type URLOpener struct {
 
 // OpenBucketURL opens the GCS bucket with the same name as the URL's host.
 func (o *URLOpener) OpenBucketURL(ctx context.Context, u *url.URL) (*blob.Bucket, error) {
-	opts, err := o.forParams(ctx, u.Query())
+	opts, client, params, err := o.forParams(ctx, u.Query())
 	if err != nil {
-		return nil, fmt.Errorf("open bucket %v: %v", u, err)
+		return nil, fmt.Errorf("open bucket %v: %w", u, err)
 	}
-	return OpenBucket(ctx, o.Client, u.Host, opts)
+	if !params.useGRPC {
+		return OpenBucket(ctx, client, u.Host, opts)
+	}
+
+	// The gRPC API cannot reuse an HTTP client, so build a dedicated client from
+	// the same credentials. The bucket owns it and closes it, since nothing else
+	// holds a reference.
+	if opts.Client != nil {
+		return nil, fmt.Errorf("open bucket %v: Options.Client cannot be combined with grpc=true or zonal=true", u)
+	}
+	var clientOpts []option.ClientOption
+	if params.useZonal {
+		clientOpts = append(clientOpts, storage.WithAppendableUploads(), storage.WithGRPCBidiReads())
+	}
+	clientOpts = append(clientOpts, opts.ClientOptions...)
+	ts := o.TokenSource
+	if params.anonymous {
+		ts = nil
+	} else if ts == nil {
+		return nil, fmt.Errorf("open bucket %v: URLOpener.TokenSource is required for grpc=true or zonal=true", u)
+	}
+	gc, cleanup, err := DialGRPC(ctx, ts, clientOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("open bucket %v: %w", u, err)
+	}
+	drv, err := openBucketGRPC(gc, u.Host, opts, true)
+	if err != nil {
+		cleanup()
+		return nil, fmt.Errorf("open bucket %v: %w", u, err)
+	}
+	return blob.NewBucket(drv), nil
 }
 
-func (o *URLOpener) forParams(ctx context.Context, q url.Values) (*Options, error) {
+// urlParams holds the transport choices parsed out of a bucket URL.
+type urlParams struct {
+	// useGRPC is set by grpc=true, and implied by zonal=true.
+	useGRPC bool
+	// useZonal is set by zonal=true.
+	useZonal bool
+	// anonymous is set when the URL asked for an unauthenticated client, via
+	// anonymous=true or access_id=-.
+	anonymous bool
+}
+
+func (o *URLOpener) forParams(ctx context.Context, q url.Values) (*Options, *gcp.HTTPClient, urlParams, error) {
+	var params urlParams
 	for k := range q {
-		if k != "access_id" && k != "private_key_path" {
-			return nil, fmt.Errorf("invalid query parameter %q", k)
+		if k != "access_id" && k != "private_key_path" && k != "anonymous" && k != "universe_domain" && k != "grpc" && k != "zonal" {
+			return nil, nil, params, fmt.Errorf("invalid query parameter %q", k)
 		}
 	}
 	opts := new(Options)
 	*opts = o.Options
+	client := o.Client
+	grpcInURL := false
+	if g := q.Get("grpc"); g != "" {
+		useGRPC, err := strconv.ParseBool(g)
+		if err != nil {
+			return nil, nil, params, fmt.Errorf("invalid value %q for query parameter \"grpc\": %w", g, err)
+		}
+		params.useGRPC = useGRPC
+		grpcInURL = true
+	}
+	if z := q.Get("zonal"); z != "" {
+		useZonal, err := strconv.ParseBool(z)
+		if err != nil {
+			return nil, nil, params, fmt.Errorf("invalid value %q for query parameter \"zonal\": %w", z, err)
+		}
+		params.useZonal = useZonal
+	}
+	// The zonal APIs exist only on the gRPC client, so zonal=true implies
+	// grpc=true. Asking for both zonal=true and grpc=false is a contradiction,
+	// so report it instead of picking a winner.
+	if params.useZonal {
+		if grpcInURL && !params.useGRPC {
+			return nil, nil, params, errors.New("query parameter \"zonal=true\" cannot be combined with \"grpc=false\"")
+		}
+		params.useGRPC = true
+	}
+	if anon := q.Get("anonymous"); anon != "" {
+		isAnon, err := strconv.ParseBool(anon)
+		if err != nil {
+			return nil, nil, params, fmt.Errorf("invalid value %q for query parameter \"anonymous\": %w", anon, err)
+		}
+		if isAnon {
+			opts.clear()
+			client = gcp.NewAnonymousHTTPClient(gcp.DefaultTransport())
+			params.anonymous = true
+		}
+	}
 	if accessID := q.Get("access_id"); accessID != "" && accessID != opts.GoogleAccessID {
-		opts.GoogleAccessID = accessID
-		opts.PrivateKey = nil // Clear any previous key unrelated to the new accessID.
-
-		// Clear this as well to prevent calls with the old and mismatched accessID.
-		opts.MakeSignBytes = nil
+		opts.clear()
+		if accessID == "-" {
+			client = gcp.NewAnonymousHTTPClient(gcp.DefaultTransport())
+			params.anonymous = true
+		} else {
+			opts.GoogleAccessID = accessID
+		}
 	}
 	if keyPath := q.Get("private_key_path"); keyPath != "" {
-		pk, err := ioutil.ReadFile(keyPath)
+		pk, err := os.ReadFile(keyPath)
 		if err != nil {
-			return nil, err
+			return nil, nil, params, err
 		}
 		opts.PrivateKey = pk
 	} else if _, exists := q["private_key_path"]; exists {
@@ -252,12 +394,13 @@ func (o *URLOpener) forParams(ctx context.Context, q url.Values) (*Options, erro
 		// is intentional such as for tests or involving a key stored in a HSM/TPM.
 		opts.PrivateKey = nil
 	}
-	return opts, nil
+	return opts, client, params, nil
 }
 
 // Options sets options for constructing a *blob.Bucket backed by GCS.
 type Options struct {
 	// GoogleAccessID represents the authorizer for SignedURL.
+	// If set to "-", an unauthenticated client will be used.
 	// Required to use SignedURL.
 	// See https://godoc.org/cloud.google.com/go/storage#SignedURLOptions.
 	GoogleAccessID string
@@ -277,6 +420,26 @@ type Options struct {
 	// MakeSignBytes is a factory for functions that are being used in place of an empty SignBytes.
 	// If your implementation of 'SignBytes' needs a request context, set this instead.
 	MakeSignBytes func(requestCtx context.Context) SignBytesFunc
+
+	// Client provides a *storage.Client to use, instead of constructing one based on
+	// the HTTPClient. When set, you must pass nil as the gcp.HTTPClient to OpenBucket.
+	//
+	// Use this to open a bucket over the Cloud Storage gRPC API, including a
+	// Rapid Storage (zonal) bucket; see DialGRPC. The caller owns the client and
+	// is responsible for closing it.
+	Client *storage.Client
+
+	// ClientOptions are passed when constructing the storage.Client.
+	// Ignored if Client is set.
+	ClientOptions []option.ClientOption
+}
+
+// clear clears all the fields of o.
+func (o *Options) clear() {
+	o.GoogleAccessID = ""
+	o.PrivateKey = nil
+	o.SignBytes = nil
+	o.MakeSignBytes = nil
 }
 
 // SignBytesFunc is shorthand for the signature of Options.SignBytes.
@@ -284,35 +447,87 @@ type SignBytesFunc func([]byte) ([]byte, error)
 
 // openBucket returns a GCS Bucket that communicates using the given HTTP client.
 func openBucket(ctx context.Context, client *gcp.HTTPClient, bucketName string, opts *Options) (*bucket, error) {
-	if client == nil {
-		return nil, errors.New("gcsblob.OpenBucket: client is required")
+	if opts == nil {
+		opts = &Options{}
 	}
 	if bucketName == "" {
 		return nil, errors.New("gcsblob.OpenBucket: bucketName is required")
 	}
-
-	clientOpts := []option.ClientOption{option.WithHTTPClient(useragent.HTTPClient(&client.Client, "blob"))}
-	if host := os.Getenv("STORAGE_EMULATOR_HOST"); host != "" {
-		clientOpts = []option.ClientOption{
-			option.WithoutAuthentication(),
-			option.WithEndpoint("http://" + host + "/storage/v1/"),
-			option.WithHTTPClient(http.DefaultClient),
+	if opts.Client != nil {
+		if client != nil {
+			return nil, errors.New("gcsblob.OpenBucket: client must be nil when providing Options.Client")
 		}
+		return &bucket{name: bucketName, client: opts.Client, opts: opts}, nil
+	}
+	if client == nil {
+		return nil, errors.New("gcsblob.OpenBucket: client is required")
 	}
 
-	// We wrap the provided http.Client to add a Go CDK User-Agent.
+	clientOpts := append(httpClientOptions(client, os.Getenv("STORAGE_EMULATOR_HOST")), opts.ClientOptions...)
 	c, err := storage.NewClient(ctx, clientOpts...)
 	if err != nil {
 		return nil, err
 	}
-	if opts == nil {
-		opts = &Options{}
-	}
 	return &bucket{name: bucketName, client: c, opts: opts}, nil
 }
 
-// OpenBucket returns a *blob.Bucket backed by an existing GCS bucket. See the
-// package documentation for an example.
+// httpClientOptions returns the client options for the JSON/HTTP storage API.
+func httpClientOptions(client *gcp.HTTPClient, emulatorHost string) []option.ClientOption {
+	if emulatorHost != "" {
+		return []option.ClientOption{
+			option.WithoutAuthentication(),
+			option.WithEndpoint("http://" + emulatorHost + "/storage/v1/"),
+			option.WithHTTPClient(http.DefaultClient),
+		}
+	}
+	// We wrap the provided http.Client to add a Go CDK User-Agent.
+	return []option.ClientOption{option.WithHTTPClient(useragent.HTTPClient(&client.Client, "blob"))}
+}
+
+// DialGRPC returns a *storage.Client that talks to Cloud Storage over gRPC
+// instead of the default JSON/HTTP API. Pass it as Options.Client, along with a
+// nil gcp.HTTPClient, to open a bucket that uses it:
+//
+//	c, cleanup, err := gcsblob.DialGRPC(ctx, gcp.CredentialsTokenSource(creds))
+//	if err != nil { ... }
+//	defer cleanup()
+//	b, err := gcsblob.OpenBucket(ctx, nil, "my-bucket", &gcsblob.Options{Client: c})
+//
+// Rapid Storage (zonal) buckets accept only appendable object uploads, and
+// reject every other write. They need the zonal bucket APIs:
+//
+//	c, cleanup, err := gcsblob.DialGRPC(ctx, ts,
+//		storage.WithAppendableUploads(), storage.WithGRPCBidiReads())
+//
+// Do not pass that option for other bucket types, which reject appendable
+// uploads in turn.
+//
+// A nil ts returns an unauthenticated client. The caller owns the returned
+// client and must call the returned clean-up function when done with it.
+//
+// Emulator support is left to storage.NewGRPCClient, which reads
+// STORAGE_EMULATOR_HOST_GRPC rather than STORAGE_EMULATOR_HOST, since a local
+// emulator needs separate ports for HTTP and gRPC. It also strips the scheme
+// from the host and dials insecurely, neither of which could be done correctly
+// from here.
+func DialGRPC(ctx context.Context, ts gcp.TokenSource, opts ...option.ClientOption) (*storage.Client, func(), error) {
+	clientOpts := []option.ClientOption{useragent.ClientOption("blob")}
+	if ts == nil {
+		clientOpts = append(clientOpts, option.WithoutAuthentication())
+	} else {
+		clientOpts = append(clientOpts, option.WithTokenSource(ts))
+	}
+	clientOpts = append(clientOpts, opts...)
+	c, err := storage.NewGRPCClient(ctx, clientOpts...)
+	if err != nil {
+		return nil, nil, err
+	}
+	return c, func() { _ = c.Close() }, nil
+}
+
+// OpenBucket returns a *blob.Bucket backed by an existing GCS bucket, using the
+// JSON/HTTP API. For the gRPC API, including Rapid Storage (zonal) buckets, see
+// OpenBucketGRPC. See the package documentation for an example.
 func OpenBucket(ctx context.Context, client *gcp.HTTPClient, bucketName string, opts *Options) (*blob.Bucket, error) {
 	drv, err := openBucket(ctx, client, bucketName, opts)
 	if err != nil {
@@ -321,15 +536,70 @@ func OpenBucket(ctx context.Context, client *gcp.HTTPClient, bucketName string, 
 	return blob.NewBucket(drv), nil
 }
 
+// OpenBucketGRPC returns a *blob.Bucket backed by an existing GCS bucket, using
+// a client that talks to Cloud Storage over gRPC rather than the default
+// JSON/HTTP API. Use DialGRPC to construct client.
+//
+// This is the entry point for Rapid Storage (zonal) buckets, which reject every
+// write over JSON/HTTP:
+//
+//	c, cleanup, err := gcsblob.DialGRPC(ctx, ts,
+//		storage.WithAppendableUploads(), storage.WithGRPCBidiReads())
+//	if err != nil { ... }
+//	defer cleanup()
+//	b, err := gcsblob.OpenBucketGRPC(c, "my-rapid-bucket", nil)
+//
+// The caller owns client. Closing the returned bucket does not close it.
+//
+// It is an error to also set Options.Client. Options.ClientOptions is ignored,
+// since those options are applied when client is constructed.
+func OpenBucketGRPC(client *storage.Client, bucketName string, opts *Options) (*blob.Bucket, error) {
+	drv, err := openBucketGRPC(client, bucketName, opts, false)
+	if err != nil {
+		return nil, err
+	}
+	return blob.NewBucket(drv), nil
+}
+
+// openBucketGRPC returns the driver behind OpenBucketGRPC. owned reports
+// whether the bucket has to close client itself, which is true only when the
+// bucket built the client rather than receiving it from the caller.
+func openBucketGRPC(client *storage.Client, bucketName string, opts *Options, owned bool) (*bucket, error) {
+	if client == nil {
+		return nil, errors.New("gcsblob.OpenBucketGRPC: client is required")
+	}
+	if opts == nil {
+		opts = &Options{}
+	}
+	if opts.Client != nil {
+		return nil, errors.New("gcsblob.OpenBucketGRPC: Options.Client must be nil; pass the client as the first argument")
+	}
+	o := *opts
+	o.Client = client
+	// ctx is unused once a client exists, so it is not part of the signature;
+	// compare secrets/gcpkms.OpenKeeper.
+	drv, err := openBucket(context.Background(), nil, bucketName, &o)
+	if err != nil {
+		return nil, err
+	}
+	if owned {
+		drv.ownedClient = client
+	}
+	return drv, nil
+}
+
 // bucket represents a GCS bucket, which handles read, write and delete operations
 // on objects within it.
 type bucket struct {
 	name   string
 	client *storage.Client
-	opts   *Options
+	// ownedClient is non-nil when this bucket created client itself and must
+	// close it. That happens only for URLs that select the gRPC API, where the
+	// client owns a connection pool that would otherwise leak. Clients supplied
+	// through Options.Client belong to the caller and are left alone.
+	ownedClient *storage.Client
+	opts        *Options
 }
-
-var emptyBody = ioutil.NopCloser(strings.NewReader(""))
 
 // reader reads a GCS object. It implements driver.Reader.
 type reader struct {
@@ -351,7 +621,7 @@ func (r *reader) Attributes() *driver.ReaderAttributes {
 	return &r.attrs
 }
 
-func (r *reader) As(i interface{}) bool {
+func (r *reader) As(i any) bool {
 	p, ok := i.(**storage.Reader)
 	if !ok {
 		return false
@@ -361,13 +631,15 @@ func (r *reader) As(i interface{}) bool {
 }
 
 func (b *bucket) ErrorCode(err error) gcerrors.ErrorCode {
-	if err == storage.ErrObjectNotExist || err == storage.ErrBucketNotExist {
+	if errors.Is(err, storage.ErrObjectNotExist) || errors.Is(err, storage.ErrBucketNotExist) {
 		return gcerrors.NotFound
 	}
 	if gerr, ok := err.(*googleapi.Error); ok {
 		switch gerr.Code {
 		case http.StatusForbidden:
-			return gcerrors.PermissionDenied
+			// 'Permission 'storage.objects.list' denied on resource (or it may not exist)'
+			// So we have to pick one.
+			return gcerrors.NotFound
 		case http.StatusNotFound:
 			return gcerrors.NotFound
 		case http.StatusPreconditionFailed:
@@ -376,10 +648,13 @@ func (b *bucket) ErrorCode(err error) gcerrors.ErrorCode {
 			return gcerrors.ResourceExhausted
 		}
 	}
-	return gcerrors.Unknown
+	return gcerr.GRPCCode(err)
 }
 
 func (b *bucket) Close() error {
+	if b.ownedClient != nil {
+		return b.ownedClient.Close()
+	}
 	return nil
 }
 
@@ -391,7 +666,7 @@ func (b *bucket) ListPaged(ctx context.Context, opts *driver.ListOptions) (*driv
 		Delimiter: escapeKey(opts.Delimiter),
 	}
 	if opts.BeforeList != nil {
-		asFunc := func(i interface{}) bool {
+		asFunc := func(i any) bool {
 			p, ok := i.(**storage.Query)
 			if !ok {
 				return false
@@ -419,7 +694,7 @@ func (b *bucket) ListPaged(ctx context.Context, opts *driver.ListOptions) (*driv
 		page.Objects = make([]*driver.ListObject, len(objects))
 		for i, obj := range objects {
 			toCopy := obj
-			asFunc := func(val interface{}) bool {
+			asFunc := func(val any) bool {
 				p, ok := val.(*storage.ObjectAttrs)
 				if !ok {
 					return false
@@ -454,7 +729,7 @@ func (b *bucket) ListPaged(ctx context.Context, opts *driver.ListOptions) (*driv
 }
 
 // As implements driver.As.
-func (b *bucket) As(i interface{}) bool {
+func (b *bucket) As(i any) bool {
 	p, ok := i.(**storage.Client)
 	if !ok {
 		return false
@@ -464,7 +739,7 @@ func (b *bucket) As(i interface{}) bool {
 }
 
 // As implements driver.ErrorAs.
-func (b *bucket) ErrorAs(err error, i interface{}) bool {
+func (b *bucket) ErrorAs(err error, i any) bool {
 	switch v := err.(type) {
 	case *googleapi.Error:
 		if p, ok := i.(**googleapi.Error); ok {
@@ -502,7 +777,7 @@ func (b *bucket) Attributes(ctx context.Context, key string) (*driver.Attributes
 		Size:               attrs.Size,
 		MD5:                attrs.MD5,
 		ETag:               eTag,
-		AsFunc: func(i interface{}) bool {
+		AsFunc: func(i any) bool {
 			p, ok := i.(*storage.ObjectAttrs)
 			if !ok {
 				return false
@@ -531,7 +806,7 @@ func (b *bucket) NewRangeReader(ctx context.Context, key string, offset, length 
 	var rerr error
 	madeReader := false
 	if opts.BeforeRead != nil {
-		asFunc := func(i interface{}) bool {
+		asFunc := func(i any) bool {
 			if p, ok := i.(***storage.ObjectHandle); ok && !madeReader {
 				*p = objp
 				return true
@@ -570,6 +845,63 @@ func (b *bucket) NewRangeReader(ctx context.Context, key string, offset, length 
 	}, nil
 }
 
+var _ driver.DownloaderAt = (*bucket)(nil)
+
+// DownloadAt implements driver.DownloaderAt. It uses the GCS transfer manager
+// to fetch the object with concurrent ranged reads, writing parts directly into
+// w. transfermanager is a subpackage of cloud.google.com/go/storage, which this
+// driver already depends on, and it reuses the driver's existing *storage.Client.
+func (b *bucket) DownloadAt(ctx context.Context, key string, w io.WriterAt, opts *driver.ReaderOptions) error {
+	key = escapeKey(key)
+	var topts []transfermanager.Option
+	if opts.BufferSize != 0 {
+		topts = append(topts, transfermanager.WithPartSize(int64(opts.BufferSize)))
+	}
+	if opts.MaxConcurrency != 0 {
+		topts = append(topts, transfermanager.WithWorkers(opts.MaxConcurrency))
+	}
+	d, err := transfermanager.NewDownloader(b.client, topts...)
+	if err != nil {
+		return err
+	}
+	in := &transfermanager.DownloadObjectInput{
+		Bucket:      b.name,
+		Object:      key,
+		Destination: w,
+	}
+	if opts.BeforeRead != nil {
+		asFunc := func(i any) bool {
+			if p, ok := i.(**transfermanager.DownloadObjectInput); ok {
+				*p = in
+				return true
+			}
+			if p, ok := i.(**transfermanager.Downloader); ok {
+				*p = d
+				return true
+			}
+			return false
+		}
+		if err := opts.BeforeRead(asFunc); err != nil {
+			_, _ = d.WaitAndClose()
+			return err
+		}
+	}
+	if err := d.DownloadObject(ctx, in); err != nil {
+		_, _ = d.WaitAndClose()
+		return err
+	}
+	outs, err := d.WaitAndClose()
+	if err != nil {
+		return err
+	}
+	for _, out := range outs {
+		if out.Err != nil {
+			return out.Err
+		}
+	}
+	return nil
+}
+
 // escapeKey does all required escaping for UTF-8 strings to work with GCS.
 func escapeKey(key string) string {
 	return escape.HexEscape(key, func(r []rune, i int) bool {
@@ -591,11 +923,14 @@ func unescapeKey(key string) string {
 }
 
 // NewTypedWriter implements driver.NewTypedWriter.
-func (b *bucket) NewTypedWriter(ctx context.Context, key string, contentType string, opts *driver.WriterOptions) (driver.Writer, error) {
+func (b *bucket) NewTypedWriter(ctx context.Context, key, contentType string, opts *driver.WriterOptions) (driver.Writer, error) {
 	key = escapeKey(key)
 	bkt := b.client.Bucket(b.name)
 	obj := bkt.Object(key)
 
+	if opts.IfNotExist {
+		obj = obj.If(storage.Conditions{DoesNotExist: true})
+	}
 	// Add an extra level of indirection so that BeforeWrite can replace obj
 	// if needed. For example, ObjectHandle.If returns a new ObjectHandle.
 	// Also, make the Writer lazily in case this replacement happens.
@@ -610,12 +945,31 @@ func (b *bucket) NewTypedWriter(ctx context.Context, key string, contentType str
 		w.ChunkSize = bufferSize(opts.BufferSize)
 		w.Metadata = opts.Metadata
 		w.MD5 = opts.ContentMD5
+		w.ForceEmptyContentType = opts.DisableContentTypeDetection
+		// Zonal buckets upload with "appendable object" semantics: the object
+		// appears as soon as the first bytes are flushed and stays open for
+		// more writes until someone finalizes it. Closing the Writer does not
+		// finalize it by default, which leaves behind an object exposing only
+		// whatever prefix had been flushed. For a write small enough to fit in
+		// one buffer that is a zero-length object, even though Close returned
+		// no error. Finalize on Close so that a closed blob.Writer always
+		// leaves a complete object, as the blob API promises.
+		//
+		// The storage client reads this field only on the appendable write
+		// path, so it does nothing over JSON/HTTP or plain gRPC. Setting it
+		// unconditionally is deliberate: it also covers callers who turn on
+		// appendable uploads by passing storage.WithAppendableUploads
+		// through Options.ClientOptions rather than using the zonal URL
+		// parameter.
+		// Callers who do want an object left open for later appends can set
+		// this back to false from WriterOptions.BeforeWrite.
+		w.FinalizeOnClose = true
 		return w
 	}
 
 	var w *storage.Writer
 	if opts.BeforeWrite != nil {
-		asFunc := func(i interface{}) bool {
+		asFunc := func(i any) bool {
 			if p, ok := i.(***storage.ObjectHandle); ok && w == nil {
 				*p = objp
 				return true
@@ -664,7 +1018,7 @@ func (b *bucket) Copy(ctx context.Context, dstKey, srcKey string, opts *driver.C
 
 	var copier *storage.Copier
 	if opts.BeforeCopy != nil {
-		asFunc := func(i interface{}) bool {
+		asFunc := func(i any) bool {
 			if p, ok := i.(**CopyObjectHandles); ok && copier == nil {
 				*p = &handles
 				return true
@@ -690,11 +1044,27 @@ func (b *bucket) Copy(ctx context.Context, dstKey, srcKey string, opts *driver.C
 }
 
 // Delete implements driver.Delete.
-func (b *bucket) Delete(ctx context.Context, key string) error {
+func (b *bucket) Delete(ctx context.Context, key string, opts *driver.DeleteOptions) error {
 	key = escapeKey(key)
 	bkt := b.client.Bucket(b.name)
 	obj := bkt.Object(key)
-	return obj.Delete(ctx)
+
+	// Extra level of indirection so BeforeDelete can replace obj if needed;
+	// e.g. ObjectHandle.If returns a new ObjectHandle to apply a precondition.
+	objp := &obj
+	if opts.BeforeDelete != nil {
+		asFunc := func(i any) bool {
+			if p, ok := i.(***storage.ObjectHandle); ok {
+				*p = objp
+				return true
+			}
+			return false
+		}
+		if err := opts.BeforeDelete(asFunc); err != nil {
+			return err
+		}
+	}
+	return (*objp).Delete(ctx)
 }
 
 func (b *bucket) SignedURL(ctx context.Context, key string, dopts *driver.SignedURLOptions) (string, error) {
@@ -725,7 +1095,7 @@ func (b *bucket) SignedURL(ctx context.Context, key string, dopts *driver.Signed
 		opts.SignBytes = b.opts.MakeSignBytes(ctx)
 	}
 	if dopts.BeforeSign != nil {
-		asFunc := func(i interface{}) bool {
+		asFunc := func(i any) bool {
 			v, ok := i.(**storage.SignedURLOptions)
 			if ok {
 				*v = opts

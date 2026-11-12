@@ -14,7 +14,7 @@
 
 // Package awsmysql provides connections to AWS RDS MySQL instances.
 //
-// URLs
+// # URLs
 //
 // For mysql.Open, awsmysql registers for the scheme "awsmysql".
 // The default URL opener will create a connection using the default
@@ -32,10 +32,15 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
+	"net/http"
 	"net/url"
-	"sync/atomic"
 
-	"contrib.go.opencensus.io/integrations/ocsql"
+	"github.com/XSAM/otelsql"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
+	"github.com/aws/aws-sdk-go-v2/feature/rds/auth"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/go-sql-driver/mysql"
 	"github.com/google/wire"
 	"gocloud.dev/aws/rds"
@@ -45,18 +50,30 @@ import (
 // Set is a Wire provider set that provides a *sql.DB given
 // *Params and an HTTP client.
 var Set = wire.NewSet(
-	wire.Struct(new(URLOpener), "CertSource"),
+	wire.Struct(new(URLOpener), "CertSource", "HTTPClient"),
 	rds.CertFetcherSet,
 )
 
 // URLOpener opens RDS MySQL URLs
 // like "awsmysql://user:password@myinstance.borkxyzzy.us-west-1.rds.amazonaws.com:3306/mydb".
+//
+// To use IAM authentication, omit the password:
+//
+//	awsmysql://iam-user@myinstance.borkxyzzy.us-west-1.rds.amazonaws.com:3306/mydb
+//
+// To specify an AWS profile or assume a role, add the following query parameters:
+//
+//   - aws_profile: the AWS shared config profile to use
+//   - aws_role_arn: the ARN of the role to assume
 type URLOpener struct {
+	// HTTPClient is the HTTP client used to fetch RDS certificates,
+	// and IAM authentication tokens.
+	HTTPClient *http.Client
 	// CertSource specifies how the opener will obtain the RDS Certificate
 	// Authority. If nil, it will use the default *rds.CertFetcher.
 	CertSource rds.CertPoolProvider
-	// TraceOpts contains options for OpenCensus.
-	TraceOpts []ocsql.TraceOption
+	// TraceOpts contains options for OpenTelemetry.
+	TraceOpts []otelsql.Option
 }
 
 // Scheme is the URL scheme awsmysql registers its URLOpener under on
@@ -67,41 +84,72 @@ func init() {
 	gcmysql.DefaultURLMux().RegisterMySQL(Scheme, &URLOpener{})
 }
 
-// OpenMySQLURL opens a new RDS database connection wrapped with OpenCensus instrumentation.
-func (uo *URLOpener) OpenMySQLURL(_ context.Context, u *url.URL) (*sql.DB, error) {
+// OpenMySQLURL opens a new RDS database connection wrapped with OpenTelemetry instrumentation.
+func (uo *URLOpener) OpenMySQLURL(ctx context.Context, u *url.URL) (*sql.DB, error) {
 	source := uo.CertSource
 	if source == nil {
-		source = new(rds.CertFetcher)
+		source = &rds.CertFetcher{Client: uo.HTTPClient}
 	}
 	if u.Host == "" {
-		return nil, fmt.Errorf("open RDS: empty endpoint")
+		return nil, fmt.Errorf("open OpenMySQLURL: empty endpoint")
 	}
-
+	// If no password provided, assume it's AWS IAM authentication.
+	// awsmysql://iam-user@host:port/dbname
+	var iam func(context.Context) (string, error)
+	if _, ok := u.User.Password(); !ok {
+		q := u.Query()
+		var cfgOpts []func(*config.LoadOptions) error
+		if uo.HTTPClient != nil {
+			cfgOpts = append(cfgOpts, config.WithHTTPClient(uo.HTTPClient))
+		}
+		if profile := q.Get("aws_profile"); profile != "" {
+			cfgOpts = append(cfgOpts, config.WithSharedConfigProfile(profile))
+			q.Del("aws_profile")
+		}
+		cfg, err := config.LoadDefaultConfig(ctx, cfgOpts...)
+		if err != nil {
+			return nil, fmt.Errorf("open OpenMySQLURL: load AWS config: %w", err)
+		}
+		creds := cfg.Credentials
+		if roleARN := q.Get("aws_role_arn"); roleARN != "" {
+			// If a RoleARN is specified, replace the credentials with AssumeRole provider.
+			creds = stscreds.NewAssumeRoleProvider(sts.NewFromConfig(cfg), roleARN)
+			q.Del("aws_role_arn")
+		}
+		u.RawQuery = q.Encode()
+		creds = aws.NewCredentialsCache(creds)
+		iam = func(ctx context.Context) (string, error) {
+			// BuildAuthToken is local-operation
+			// and does not make network calls.
+			// The credentials provider may make network calls,
+			// but we are wrapped it with caching.
+			return auth.BuildAuthToken(ctx, u.Host, cfg.Region, u.User.Username(), creds)
+		}
+	}
 	cfg, err := gcmysql.ConfigFromURL(u)
 	if err != nil {
 		return nil, err
 	}
+	cfg.AllowCleartextPasswords = true
 	c := &connector{
-		dsn: cfg.FormatDSN(),
-		// Make a copy of TraceOpts to avoid caller modifying.
-		traceOpts: append([]ocsql.TraceOption(nil), uo.TraceOpts...),
-		provider:  source,
+		cfg:      cfg,
+		iam:      iam,
+		provider: source,
 
 		sem:   make(chan struct{}, 1),
 		ready: make(chan struct{}),
 	}
 	c.sem <- struct{}{}
-	return sql.OpenDB(c), nil
+	return otelsql.OpenDB(c, uo.TraceOpts...), nil
 }
 
 type connector struct {
-	traceOpts []ocsql.TraceOption
-
 	sem      chan struct{} // receive to acquire, send to release
 	provider CertPoolProvider
 
 	ready chan struct{} // closed after resolving dsn
-	dsn   string
+	cfg   *mysql.Config
+	iam   func(context.Context) (string, error)
 }
 
 func (c *connector) Connect(ctx context.Context) (driver.Conn, error) {
@@ -110,38 +158,33 @@ func (c *connector) Connect(ctx context.Context) (driver.Conn, error) {
 		certPool, err := c.provider.RDSCertPool(ctx)
 		if err != nil {
 			c.sem <- struct{}{} // release
-			return nil, fmt.Errorf("connect RDS: %v", err)
+			return nil, fmt.Errorf("connect RDS: %w", err)
 		}
-		// TODO(light): Avoid global registry once https://github.com/go-sql-driver/mysql/issues/771 is fixed.
-		tlsConfigName := fmt.Sprintf(
-			"gocloud.dev/mysql/awsmysql/%d",
-			atomic.AddUint32(&tlsConfigCounter, 1),
-		)
-		err = mysql.RegisterTLSConfig(tlsConfigName, &tls.Config{
-			RootCAs: certPool,
-		})
-		if err != nil {
-			c.sem <- struct{}{} // release
-			return nil, fmt.Errorf("connect RDS: register TLS: %v", err)
-		}
-		cfg, _ := mysql.ParseDSN(c.dsn)
-		cfg.TLSConfig = tlsConfigName
-		c.dsn = cfg.FormatDSN()
+		c.cfg.TLS = &tls.Config{RootCAs: certPool}
 		close(c.ready)
 		// Don't release sem: make it block forever, so this case won't be run again.
 	case <-c.ready:
 		// Already succeeded.
 	case <-ctx.Done():
-		return nil, fmt.Errorf("connect RDS: waiting for certificates: %v", ctx.Err())
+		return nil, fmt.Errorf("connect RDS: waiting for certificates: %w", ctx.Err())
 	}
-	return c.Driver().Open(c.dsn)
+	cfg := c.cfg.Clone()
+	if c.iam != nil {
+		var err error
+		if cfg.Passwd, err = c.iam(ctx); err != nil {
+			return nil, fmt.Errorf("connect RDS: refresh auth token: %w", err)
+		}
+	}
+	inner, err := mysql.NewConnector(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("connect RDS: create connector: %w", err)
+	}
+	return inner.Connect(ctx)
 }
 
 func (c *connector) Driver() driver.Driver {
-	return ocsql.Wrap(mysql.MySQLDriver{}, c.traceOpts...)
+	return mysql.MySQLDriver{}
 }
-
-var tlsConfigCounter uint32
 
 // A CertPoolProvider obtains a certificate pool that contains the RDS CA certificate.
 type CertPoolProvider = rds.CertPoolProvider

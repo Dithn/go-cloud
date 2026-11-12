@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"sort"
 	"strconv"
 	"testing"
@@ -80,7 +81,9 @@ type HarnessMaker func(ctx context.Context, t *testing.T) (Harness, error)
 // 1. Calls TopicCheck.
 // 2. Calls SubscriptionCheck.
 // 3. Sends a message, setting Message.BeforeSend to BeforeSend
-//    and Message.AfterSend to AfterSend.
+//
+//	and Message.AfterSend to AfterSend.
+//
 // 4. Receives the message and calls MessageCheck.
 // 5. Calls TopicErrorCheck.
 // 6. Calls SubscriptionErrorCheck.
@@ -104,10 +107,10 @@ type AsTest interface {
 	MessageCheck(m *pubsub.Message) error
 	// BeforeSend will be used as Message.BeforeSend as part of sending a test
 	// message.
-	BeforeSend(as func(interface{}) bool) error
+	BeforeSend(as func(any) bool) error
 	// AfterSend will be used as Message.AfterSend as part of sending a test
 	// message.
-	AfterSend(as func(interface{}) bool) error
+	AfterSend(as func(any) bool) error
 }
 
 // Many tests set the maximum batch size to 1 to make record/replay stable.
@@ -160,14 +163,14 @@ func (verifyAsFailsOnNil) MessageCheck(m *pubsub.Message) error {
 	return nil
 }
 
-func (verifyAsFailsOnNil) BeforeSend(as func(interface{}) bool) error {
+func (verifyAsFailsOnNil) BeforeSend(as func(any) bool) error {
 	if as(nil) {
 		return errors.New("want Message.BeforeSend's As function to return false when passed nil")
 	}
 	return nil
 }
 
-func (verifyAsFailsOnNil) AfterSend(as func(interface{}) bool) error {
+func (verifyAsFailsOnNil) AfterSend(as func(any) bool) error {
 	if as(nil) {
 		return errors.New("want Message.AfterSend's As function to return false when passed nil")
 	}
@@ -176,6 +179,8 @@ func (verifyAsFailsOnNil) AfterSend(as func(interface{}) bool) error {
 
 // RunConformanceTests runs conformance tests for driver implementations of pubsub.
 func RunConformanceTests(t *testing.T, newHarness HarnessMaker, asTests []AsTest) {
+	t.Helper()
+
 	tests := map[string]func(t *testing.T, newHarness HarnessMaker){
 		"TestSendReceive":                          testSendReceive,
 		"TestSendReceiveTwo":                       testSendReceiveTwo,
@@ -208,6 +213,8 @@ func RunConformanceTests(t *testing.T, newHarness HarnessMaker, asTests []AsTest
 
 // RunBenchmarks runs benchmarks for driver implementations of pubsub.
 func RunBenchmarks(b *testing.B, topic *pubsub.Topic, sub *pubsub.Subscription) {
+	b.Helper()
+
 	b.Run("BenchmarkReceive", func(b *testing.B) {
 		benchmark(b, topic, sub, false)
 	})
@@ -217,6 +224,8 @@ func RunBenchmarks(b *testing.B, topic *pubsub.Topic, sub *pubsub.Subscription) 
 }
 
 func testNonExistentTopicSucceedsOnOpenButFailsOnSend(t *testing.T, newHarness HarnessMaker) {
+	t.Helper()
+
 	// Set up.
 	ctx := context.Background()
 	h, err := newHarness(ctx, t)
@@ -246,6 +255,8 @@ func testNonExistentTopicSucceedsOnOpenButFailsOnSend(t *testing.T, newHarness H
 }
 
 func testNonExistentSubscriptionSucceedsOnOpenButFailsOnReceive(t *testing.T, newHarness HarnessMaker) {
+	t.Helper()
+
 	// Set up.
 	ctx := context.Background()
 	h, err := newHarness(ctx, t)
@@ -276,6 +287,8 @@ func testNonExistentSubscriptionSucceedsOnOpenButFailsOnReceive(t *testing.T, ne
 }
 
 func testSendReceive(t *testing.T, newHarness HarnessMaker) {
+	t.Helper()
+
 	// Set up.
 	ctx := context.Background()
 	h, err := newHarness(ctx, t)
@@ -308,6 +321,8 @@ func testSendReceive(t *testing.T, newHarness HarnessMaker) {
 // Receive from two subscriptions to the same topic.
 // Verify both get all the messages.
 func testSendReceiveTwo(t *testing.T, newHarness HarnessMaker) {
+	t.Helper()
+
 	// Set up.
 	ctx := context.Background()
 	h, err := newHarness(ctx, t)
@@ -332,7 +347,7 @@ func testSendReceiveTwo(t *testing.T, newHarness HarnessMaker) {
 	}()
 
 	var ss []*pubsub.Subscription
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		ds, cleanup, err := h.CreateSubscription(ctx, dt, t.Name())
 		if err != nil {
 			t.Fatal(err)
@@ -356,6 +371,8 @@ func testSendReceiveTwo(t *testing.T, newHarness HarnessMaker) {
 }
 
 func testSendReceiveJSON(t *testing.T, newHarness HarnessMaker) {
+	t.Helper()
+
 	const json = `{"Foo": "Bar"}`
 	// Set up.
 	ctx := context.Background()
@@ -387,6 +404,8 @@ func testSendReceiveJSON(t *testing.T, newHarness HarnessMaker) {
 }
 
 func testNack(t *testing.T, newHarness HarnessMaker) {
+	t.Helper()
+
 	const nMessages = 2
 
 	// Set up.
@@ -431,7 +450,7 @@ func testNack(t *testing.T, newHarness HarnessMaker) {
 	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	var got []*pubsub.Message
-	for i := 0; i < nMessages; i++ {
+	for range nMessages {
 		m, err := sub.Receive(ctx2)
 		if err != nil {
 			t.Fatal(err)
@@ -450,7 +469,7 @@ func testNack(t *testing.T, newHarness HarnessMaker) {
 	defer cancel()
 
 	got = nil
-	for i := 0; i < nMessages; i++ {
+	for range nMessages {
 		m, err := sub.Receive(ctx2)
 		if err != nil {
 			t.Fatal(err)
@@ -464,6 +483,8 @@ func testNack(t *testing.T, newHarness HarnessMaker) {
 }
 
 func testBatching(t *testing.T, newHarness HarnessMaker) {
+	t.Helper()
+
 	const nMessages = 12 // must be divisible by 2
 	const batchSize = nMessages / 2
 
@@ -517,7 +538,7 @@ func testBatching(t *testing.T, newHarness HarnessMaker) {
 	// that they appear in the SendBatch is not stable.
 	gr, grctx := errgroup.WithContext(ctx)
 	var want []*pubsub.Message
-	for i := 0; i < nMessages; i++ {
+	for range nMessages {
 		m := &pubsub.Message{Body: []byte("hello world")}
 		want = append(want, m)
 		gr.Go(func() error { return topic.Send(grctx, m) })
@@ -531,7 +552,7 @@ func testBatching(t *testing.T, newHarness HarnessMaker) {
 	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	var got []*pubsub.Message
-	for i := 0; i < nMessages; i++ {
+	for range nMessages {
 		m, err := sub.Receive(ctx2)
 		if err != nil {
 			t.Fatal(err)
@@ -545,6 +566,8 @@ func testBatching(t *testing.T, newHarness HarnessMaker) {
 }
 
 func testDoubleAck(t *testing.T, newHarness HarnessMaker) {
+	t.Helper()
+
 	// Set up.
 	ctx := context.Background()
 	h, err := newHarness(ctx, t)
@@ -564,7 +587,7 @@ func testDoubleAck(t *testing.T, newHarness HarnessMaker) {
 	defer subCleanup()
 
 	// Publish 3 messages.
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		err := dt.SendBatch(ctx, []*driver.Message{{Body: []byte(strconv.Itoa(i))}})
 		if err != nil {
 			t.Fatal(err)
@@ -636,8 +659,10 @@ Loop:
 
 // Publish n different messages to the topic. Return the messages.
 func publishN(ctx context.Context, t *testing.T, topic *pubsub.Topic, n int) []*pubsub.Message {
+	t.Helper()
+
 	var ms []*pubsub.Message
-	for i := 0; i < n; i++ {
+	for i := range n {
 		m := &pubsub.Message{
 			Body:     []byte(strconv.Itoa(i)),
 			Metadata: map[string]string{"a": strconv.Itoa(i)},
@@ -652,11 +677,13 @@ func publishN(ctx context.Context, t *testing.T, topic *pubsub.Topic, n int) []*
 
 // Receive and ack n messages from sub.
 func receiveN(ctx context.Context, t *testing.T, sub *pubsub.Subscription, n int) []*pubsub.Message {
+	t.Helper()
+
 	// The test will hang here if the message(s) aren't available, so use a shorter timeout.
 	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	var ms []*pubsub.Message
-	for i := 0; i < n; i++ {
+	for range n {
 		m, err := sub.Receive(ctx2)
 		if err != nil {
 			t.Fatal(err)
@@ -677,6 +704,8 @@ func diffMessageSets(got, want []*pubsub.Message) string {
 }
 
 func testErrorOnSendToClosedTopic(t *testing.T, newHarness HarnessMaker) {
+	t.Helper()
+
 	// Set up.
 	ctx := context.Background()
 	h, err := newHarness(ctx, t)
@@ -707,6 +736,8 @@ func testErrorOnSendToClosedTopic(t *testing.T, newHarness HarnessMaker) {
 }
 
 func testErrorOnReceiveFromClosedSubscription(t *testing.T, newHarness HarnessMaker) {
+	t.Helper()
+
 	ctx := context.Background()
 	h, err := newHarness(ctx, t)
 	if err != nil {
@@ -739,6 +770,8 @@ func testErrorOnReceiveFromClosedSubscription(t *testing.T, newHarness HarnessMa
 }
 
 func testCancelSendReceive(t *testing.T, newHarness HarnessMaker) {
+	t.Helper()
+
 	ctx := context.Background()
 	h, err := newHarness(ctx, t)
 	if err != nil {
@@ -770,6 +803,8 @@ func testCancelSendReceive(t *testing.T, newHarness HarnessMaker) {
 }
 
 func testMetadata(t *testing.T, newHarness HarnessMaker) {
+	t.Helper()
+
 	// Set up.
 	ctx := context.Background()
 	h, err := newHarness(ctx, t)
@@ -786,7 +821,7 @@ func testMetadata(t *testing.T, newHarness HarnessMaker) {
 	for _, v := range escape.WeirdStrings {
 		weirdStrings = append(weirdStrings, v)
 	}
-	sort.Slice(weirdStrings, func(i, j int) bool { return weirdStrings[i] < weirdStrings[j] })
+	slices.Sort(weirdStrings)
 
 	weirdMetaDataGroups := []map[string]string{{}}
 	i := 0
@@ -842,6 +877,8 @@ func testMetadata(t *testing.T, newHarness HarnessMaker) {
 }
 
 func testNonUTF8MessageBody(t *testing.T, newHarness HarnessMaker) {
+	t.Helper()
+
 	// Set up.
 	ctx := context.Background()
 	h, err := newHarness(ctx, t)
@@ -899,6 +936,8 @@ func isCanceled(err error) bool {
 }
 
 func makePair(ctx context.Context, t *testing.T, h Harness) (*pubsub.Topic, *pubsub.Subscription, func(), error) {
+	t.Helper()
+
 	dt, topicCleanup, err := h.CreateTopic(ctx, t.Name())
 	if err != nil {
 		return nil, nil, nil, err
@@ -925,6 +964,8 @@ func makePair(ctx context.Context, t *testing.T, h Harness) (*pubsub.Topic, *pub
 
 // testAs tests the various As functions, using AsTest.
 func testAs(t *testing.T, newHarness HarnessMaker, st AsTest) {
+	t.Helper()
+
 	ctx := context.Background()
 	h, err := newHarness(ctx, t)
 	if err != nil {
@@ -977,7 +1018,10 @@ func testAs(t *testing.T, newHarness HarnessMaker, st AsTest) {
 			t.Error(err)
 		}
 	}()
-	topicErr := nonexistentTopic.Send(ctx, &pubsub.Message{})
+	// The test will hang here if Send doesn't fail quickly, so set a shorter timeout.
+	ctx2, cancel = context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	topicErr := nonexistentTopic.Send(ctx2, &pubsub.Message{})
 	if topicErr == nil || gcerrors.Code(topicErr) != gcerrors.NotFound {
 		t.Errorf("got error %v sending to nonexistent topic, want Code=NotFound", topicErr)
 	} else if err := st.TopicErrorCheck(topic, topicErr); err != nil {
@@ -1013,6 +1057,8 @@ func testAs(t *testing.T, newHarness HarnessMaker, st AsTest) {
 // how long it takes to send (if timeSend is true) or receive (if timeSend
 // is false) them all.
 func benchmark(b *testing.B, topic *pubsub.Topic, sub *pubsub.Subscription, timeSend bool) {
+	b.Helper()
+
 	attrs := map[string]string{"label": "value"}
 	body := []byte("hello, world")
 	const (
@@ -1041,11 +1087,16 @@ func benchmark(b *testing.B, topic *pubsub.Topic, sub *pubsub.Subscription, time
 			b.Fatalf("receiving: %v", err)
 		}
 		b.SetBytes(nMessages * 1e6)
-		b.Log("MB/s is actually number of messages received per second")
+		if timeSend {
+			b.Log("MB/s is actually number of messages sent per second")
+		} else {
+			b.Log("MB/s is actually number of messages received per second")
+		}
 		if timeSend {
 			b.StartTimer()
 		}
 	}
+	b.ReportMetric(nMessages, "items/op")
 }
 
 func publishNConcurrently(topic *pubsub.Topic, nMessages, nGoroutines int, attrs map[string]string, body []byte) error {
@@ -1070,9 +1121,9 @@ func receiveNConcurrently(sub *pubsub.Subscription, nMessages, nGoroutines int) 
 func runConcurrently(n, g int, f func(context.Context) error) error {
 	gr, ctx := errgroup.WithContext(context.Background())
 	ng := n / g
-	for i := 0; i < g; i++ {
+	for range g {
 		gr.Go(func() error {
-			for j := 0; j < ng; j++ {
+			for range ng {
 				if err := f(ctx); err != nil {
 					return err
 				}

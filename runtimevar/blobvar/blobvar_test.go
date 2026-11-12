@@ -17,10 +17,8 @@ package blobvar
 import (
 	"context"
 	"errors"
-	"io/ioutil"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -39,14 +37,15 @@ type harness struct {
 }
 
 func newHarness(t *testing.T) (drivertest.Harness, error) {
-	dir := path.Join(os.TempDir(), "go-cloud-blobvar")
-	if err := os.MkdirAll(dir, os.ModePerm); err != nil {
-		return nil, err
-	}
+	t.Helper()
+
+	dir := t.TempDir()
+
 	b, err := fileblob.OpenBucket(dir, nil)
 	if err != nil {
 		return nil, err
 	}
+
 	return &harness{dir: dir, bucket: b}, nil
 }
 
@@ -67,7 +66,7 @@ func (h *harness) DeleteVariable(ctx context.Context, name string) error {
 }
 
 func (h *harness) Close() {
-	h.bucket.Close()
+	_ = h.bucket.Close()
 	_ = os.RemoveAll(h.dir)
 }
 
@@ -92,21 +91,21 @@ func (verifyAs) ErrorCheck(v *runtimevar.Variable, err error) error {
 	if !v.ErrorAs(err, &perr) {
 		return errors.New("runtimevar.ErrorAs failed with *os.PathError")
 	}
+	if !errors.As(err, &perr) {
+		return errors.New("errors.As failed with *os.PathError")
+	}
 	return nil
 }
 
 func TestOpenVariable(t *testing.T) {
-	dir, err := ioutil.TempDir("", "gcdk-blob-var-example")
-	if err != nil {
+	dir := t.TempDir()
+
+	if err := os.WriteFile(filepath.Join(dir, "myvar.json"), []byte(`{"Foo": "Bar"}`), 0o666); err != nil {
 		t.Fatal(err)
 	}
-	if err := ioutil.WriteFile(filepath.Join(dir, "myvar.json"), []byte(`{"Foo": "Bar"}`), 0666); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "myvar.txt"), []byte("hello world!"), 0o666); err != nil {
 		t.Fatal(err)
 	}
-	if err := ioutil.WriteFile(filepath.Join(dir, "myvar.txt"), []byte("hello world!"), 0666); err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir)
 
 	// Convert dir to a URL path, adding a leading "/" if needed on Windows
 	// (on Unix, dirpath already has a leading "/").
@@ -121,7 +120,7 @@ func TestOpenVariable(t *testing.T) {
 		URL          string
 		WantErr      bool
 		WantWatchErr bool
-		Want         interface{}
+		Want         any
 	}{
 		// myvar does not exist.
 		{"mem://", "blob://myvar", false, true, nil},
@@ -142,18 +141,24 @@ func TestOpenVariable(t *testing.T) {
 		// Working example with string decoder.
 		{bucketURL, "blob://myvar.txt?decoder=string", false, false, "hello world!"},
 		// Working example with JSON decoder.
-		{bucketURL, "blob://myvar.json?decoder=jsonmap", false, false, &map[string]interface{}{"Foo": "Bar"}},
+		{bucketURL, "blob://myvar.json?decoder=jsonmap", false, false, &map[string]any{"Foo": "Bar"}},
+		// Setting wait.
+		{bucketURL, "blob://myvar.txt?wait=2m", false, false, []byte("hello world!")},
+		// Invalid wait.
+		{bucketURL, "blob://myvar.txt?wait=x", true, false, nil},
 	}
 
 	ctx := context.Background()
 	for _, test := range tests {
 		t.Run(test.BucketURL, func(t *testing.T) {
-			os.Setenv("BLOBVAR_BUCKET_URL", test.BucketURL)
+			t.Setenv("BLOBVAR_BUCKET_URL", test.BucketURL)
 
 			opener := &defaultOpener{}
 			defer func() {
 				if opener.opener != nil && opener.opener.Bucket != nil {
-					opener.opener.Bucket.Close()
+					if err := opener.opener.Bucket.Close(); err != nil {
+						t.Errorf("failed to Close: %v", err)
+					}
 				}
 			}()
 			u, err := url.Parse(test.URL)
@@ -162,7 +167,11 @@ func TestOpenVariable(t *testing.T) {
 			}
 			v, err := opener.OpenVariableURL(ctx, u)
 			if v != nil {
-				defer v.Close()
+				defer func(v *runtimevar.Variable) {
+					if err := v.Close(); err != nil {
+						t.Errorf("failed to Close: %v", err)
+					}
+				}(v)
 			}
 			if (err != nil) != test.WantErr {
 				t.Errorf("BucketURL %s URL %s: got error %v, want error %v", test.BucketURL, test.URL, err, test.WantErr)
@@ -170,7 +179,6 @@ func TestOpenVariable(t *testing.T) {
 			if err != nil {
 				return
 			}
-			defer v.Close()
 			snapshot, err := v.Watch(ctx)
 			if (err != nil) != test.WantWatchErr {
 				t.Errorf("BucketURL %s URL %s: got Watch error %v, want error %v", test.BucketURL, test.URL, err, test.WantWatchErr)

@@ -18,8 +18,8 @@ import (
 	"context"
 	"log"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"gocloud.dev/blob"
 	"gocloud.dev/blob/s3blob"
 )
@@ -29,22 +29,20 @@ func ExampleOpenBucket() {
 	// PRAGMA: On gocloud.dev, hide lines until the next blank line.
 	ctx := context.Background()
 
-	// Establish an AWS session.
-	// See https://docs.aws.amazon.com/sdk-for-go/api/aws/session/ for more info.
-	// The region must match the region for "my-bucket".
-	sess, err := session.NewSession(&aws.Config{
-		Region: aws.String("us-west-1"),
-	})
+	// Establish a AWS Config.
+	// See https://aws.github.io/aws-sdk-go-v2/docs/configuring-sdk/ for more info.
+	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	// Create a *blob.Bucket.
-	bucket, err := s3blob.OpenBucket(ctx, sess, "my-bucket", nil)
+	client := s3.NewFromConfig(cfg)
+	bucket, err := s3blob.OpenBucket(ctx, client, "my-bucket", nil)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer bucket.Close()
+	defer func() { _ = bucket.Close() }()
 }
 
 func Example_openBucketFromURL() {
@@ -58,5 +56,5 @@ func Example_openBucketFromURL() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer bucket.Close()
+	defer func() { _ = bucket.Close() }()
 }

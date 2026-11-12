@@ -18,17 +18,18 @@
 // Every document in a memdocstore collection has a unique primary key. The primary
 // key values need not be strings; they may be any comparable Go value.
 //
-//
-// Action Lists
+// # Action Lists
 //
 // Action lists are executed concurrently. Each action in an action list is executed
 // in a separate goroutine.
 //
+// memdocstore supports atomic writes. When using AtomicWrites(), all write actions
+// in the action list are executed atomically - either all succeed or all fail together.
+//
 // memdocstore calls the BeforeDo function of an ActionList once before executing the
 // actions. Its As function never returns true.
 //
-//
-// URLs
+// # URLs
 //
 // For docstore.OpenCollection, memdocstore registers for the scheme
 // "mem".
@@ -70,6 +71,13 @@ type Options struct {
 	// When the collection is closed, its contents are saved to the file.
 	Filename string
 
+	// AllowNestedSliceQueries allows querying into nested slices.
+	// If true queries for a field path which points to a slice will return
+	// true if any element of the slice has a value that validates with the operator.
+	// This makes the memdocstore more compatible with MongoDB,
+	// but other providers may not support this feature.
+	AllowNestedSliceQueries bool
+
 	// Call this function when the collection is closed.
 	// For internal use only.
 	onClose func()
@@ -95,7 +103,7 @@ func OpenCollection(keyField string, opts *Options) (*docstore.Collection, error
 // For the collection to be usable with Query.Delete and Query.Update,
 // keyFunc must work with map[string]interface{} as well as whatever
 // struct type the collection normally uses (if any).
-func OpenCollectionWithKeyFunc(keyFunc func(docstore.Document) interface{}, opts *Options) (*docstore.Collection, error) {
+func OpenCollectionWithKeyFunc(keyFunc func(docstore.Document) any, opts *Options) (*docstore.Collection, error) {
 	c, err := newCollection("", keyFunc, opts)
 	if err != nil {
 		return nil, err
@@ -103,7 +111,7 @@ func OpenCollectionWithKeyFunc(keyFunc func(docstore.Document) interface{}, opts
 	return docstore.NewCollection(c), nil
 }
 
-func newCollection(keyField string, keyFunc func(docstore.Document) interface{}, opts *Options) (driver.Collection, error) {
+func newCollection(keyField string, keyFunc func(docstore.Document) any, opts *Options) (driver.Collection, error) {
 	if keyField == "" && keyFunc == nil {
 		return nil, gcerr.Newf(gcerr.InvalidArgument, nil, "must provide either keyField or keyFunc")
 	}
@@ -134,18 +142,18 @@ func newCollection(keyField string, keyFunc func(docstore.Document) interface{},
 // Using a separate helps distinguish documents coming from a user (those "on
 // the client," in a more typical driver that acts as a network client) from
 // those stored in a collection (those "on the server").
-type storedDoc map[string]interface{}
+type storedDoc map[string]any
 
 type collection struct {
 	keyField    string
-	keyFunc     func(docstore.Document) interface{}
+	keyFunc     func(docstore.Document) any
 	opts        *Options
 	mu          sync.Mutex
-	docs        map[interface{}]storedDoc
+	docs        map[any]storedDoc
 	curRevision int64 // incremented on each write
 }
 
-func (c *collection) Key(doc driver.Document) (interface{}, error) {
+func (c *collection) Key(doc driver.Document) (any, error) {
 	if c.keyField != "" {
 		key, _ := doc.GetField(c.keyField) // no error on missing key, and it will be nil
 		return key, nil
@@ -174,7 +182,6 @@ func (c *collection) RunActions(ctx context.Context, actions []*driver.Action, o
 	run := func(as []*driver.Action) {
 		t := driver.NewThrottle(c.opts.MaxOutstandingActions)
 		for _, a := range as {
-			a := a
 			t.Acquire()
 			go func() {
 				defer t.Release()
@@ -185,7 +192,7 @@ func (c *collection) RunActions(ctx context.Context, actions []*driver.Action, o
 	}
 
 	if opts.BeforeDo != nil {
-		if err := opts.BeforeDo(func(interface{}) bool { return false }); err != nil {
+		if err := opts.BeforeDo(func(any) bool { return false }); err != nil {
 			for i := range errs {
 				errs[i] = err
 			}
@@ -193,12 +200,77 @@ func (c *collection) RunActions(ctx context.Context, actions []*driver.Action, o
 		}
 	}
 
-	beforeGets, gets, writes, afterGets := driver.GroupActions(actions)
+	beforeGets, gets, writes, writesTx, afterGets := driver.GroupActions(actions)
 	run(beforeGets)
 	run(gets)
 	run(writes)
+
+	// Handle atomic writes separately to ensure they are truly atomic
+	if len(writesTx) > 0 {
+		c.runAtomicWrites(ctx, writesTx, errs)
+	}
+
 	run(afterGets)
 	return driver.NewActionListError(errs)
+}
+
+// runAtomicWrites executes multiple write actions atomically.
+// All writes either succeed or all fail together.
+func (c *collection) runAtomicWrites(ctx context.Context, actions []*driver.Action, errs []error) {
+	// Stop if the context is done.
+	if ctx.Err() != nil {
+		for _, a := range actions {
+			errs[a.Index] = ctx.Err()
+		}
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// First, validate all actions and collect current documents
+	type actionInfo struct {
+		action  *driver.Action
+		current storedDoc
+		exists  bool
+	}
+
+	actionInfos := make([]actionInfo, len(actions))
+	for i, a := range actions {
+		info := &actionInfos[i]
+		info.action = a
+
+		if a.Key != nil {
+			info.current, info.exists = c.docs[a.Key]
+		}
+
+		// Check for NotFound errors
+		if !info.exists && (a.Kind == driver.Replace || a.Kind == driver.Update || a.Kind == driver.Get) {
+			for _, a2 := range actions {
+				errs[a2.Index] = gcerr.Newf(gcerr.NotFound, nil, "document with key %v does not exist", a.Key)
+			}
+			return
+		}
+
+		// Check revision conflicts
+		if err := c.checkRevision(a.Doc, info.current); err != nil {
+			for _, a2 := range actions {
+				errs[a2.Index] = err
+			}
+			return
+		}
+	}
+
+	// Now execute all actions atomically
+	for _, info := range actionInfos {
+		if err := c.executeAction(info.action, info.current, info.exists); err != nil {
+			// If any action fails, mark all actions as failed
+			for _, a2 := range actions {
+				errs[a2.Index] = err
+			}
+			return
+		}
+	}
 }
 
 // runAction executes a single action.
@@ -222,6 +294,28 @@ func (c *collection) runAction(ctx context.Context, a *driver.Action) error {
 	if !exists && (a.Kind == driver.Replace || a.Kind == driver.Update || a.Kind == driver.Get) {
 		return gcerr.Newf(gcerr.NotFound, nil, "document with key %v does not exist", a.Key)
 	}
+
+	// Check revision conflicts
+	if a.Kind != driver.Get && a.Kind != driver.Create {
+		if err := c.checkRevision(a.Doc, current); err != nil {
+			return err
+		}
+	}
+
+	// Execute the action for Get
+	if a.Kind == driver.Get {
+		// Handle Get separately since it doesn't modify the document.
+		// We've already retrieved the document into current, above.
+		// Now we copy its fields into the user-provided document.
+		return decodeDoc(current, a.Doc, a.FieldPaths)
+	}
+
+	return c.executeAction(a, current, exists)
+}
+
+// executeAction executes a single action. Must be called with the lock held.
+// This method is shared between runAction and runAtomicWrites to eliminate code duplication.
+func (c *collection) executeAction(a *driver.Action, current storedDoc, exists bool) error {
 	switch a.Kind {
 	case driver.Create:
 		// It is an error to attempt to create an existing document.
@@ -239,9 +333,6 @@ func (c *collection) runAction(ctx context.Context, a *driver.Action) error {
 		fallthrough
 
 	case driver.Replace, driver.Put:
-		if err := c.checkRevision(a.Doc, current); err != nil {
-			return err
-		}
 		doc, err := encodeDoc(a.Doc)
 		if err != nil {
 			return err
@@ -255,15 +346,9 @@ func (c *collection) runAction(ctx context.Context, a *driver.Action) error {
 		c.docs[a.Key] = doc
 
 	case driver.Delete:
-		if err := c.checkRevision(a.Doc, current); err != nil {
-			return err
-		}
 		delete(c.docs, a.Key)
 
 	case driver.Update:
-		if err := c.checkRevision(a.Doc, current); err != nil {
-			return err
-		}
 		if err := c.update(current, a.Mods); err != nil {
 			return err
 		}
@@ -274,12 +359,6 @@ func (c *collection) runAction(ctx context.Context, a *driver.Action) error {
 			}
 		}
 
-	case driver.Get:
-		// We've already retrieved the document into current, above.
-		// Now we copy its fields into the user-provided document.
-		if err := decodeDoc(current, a.Doc, a.FieldPaths); err != nil {
-			return err
-		}
 	default:
 		return gcerr.Newf(gcerr.Internal, nil, "unknown kind %v", a.Kind)
 	}
@@ -295,9 +374,9 @@ func (c *collection) update(doc storedDoc, mods []driver.Mod) error {
 	// To make update atomic, we first convert the actions into a form that can't
 	// fail.
 	type guaranteedMod struct {
-		parentMap    map[string]interface{} // the map holding the key to be modified
+		parentMap    map[string]any // the map holding the key to be modified
 		key          string
-		encodedValue interface{} // the value after encoding
+		encodedValue any // the value after encoding
 	}
 
 	gmods := make([]guaranteedMod, len(mods))
@@ -340,7 +419,7 @@ func (c *collection) update(doc storedDoc, mods []driver.Mod) error {
 // Since they're encoded, they are either int64 or float64.
 // Allow adding a float to an int, producing a float.
 // TODO(jba): see how other drivers handle that.
-func add(x, y interface{}) (interface{}, error) {
+func add(x, y any) (any, error) {
 	if x == nil {
 		return y, nil
 	}
@@ -399,23 +478,49 @@ func (c *collection) checkRevision(arg driver.Document, current storedDoc) error
 	return nil
 }
 
-// getAtFieldPath gets the value of m at fp. It returns an error if fp is invalid
+// getAtFieldPath gets the value of m at fp. It returns an error if fp is invalid.
+// If nested is true compare against all elements of a slice, see AllowNestedSliceQueries
 // (see getParentMap).
-func getAtFieldPath(m map[string]interface{}, fp []string) (interface{}, error) {
-	m2, err := getParentMap(m, fp, false)
-	if err != nil {
-		return nil, err
+func getAtFieldPath(m map[string]any, fp []string, nested bool) (result any, err error) {
+	var get func(m any, name string) any
+	get = func(m any, name string) any {
+		switch m := m.(type) {
+		case map[string]any:
+			return m[name]
+		case []any:
+			if !nested {
+				return nil
+			}
+			var result []any
+			for _, e := range m {
+				next := get(e, name)
+				// If we have slices within slices the compare function does not see the nested slices.
+				// Changing the compare function to be recursive would be more effort than flattening the slices here.
+				sliced, ok := next.([]any)
+				if ok {
+					result = append(result, sliced...)
+				} else {
+					result = append(result, next)
+				}
+			}
+			return result
+		}
+		return nil
 	}
-	v, ok := m2[fp[len(fp)-1]]
-	if ok {
-		return v, nil
+	result = m
+	for _, k := range fp {
+		next := get(result, k)
+		if next == nil {
+			return nil, gcerr.Newf(gcerr.NotFound, nil, "field %s not found", strings.Join(fp, "."))
+		}
+		result = next
 	}
-	return nil, gcerr.Newf(gcerr.NotFound, nil, "field %s not found", fp)
+	return result, nil
 }
 
 // setAtFieldPath sets m's value at fp to val. It creates intermediate maps as
 // needed. It returns an error if a non-final component of fp does not denote a map.
-func setAtFieldPath(m map[string]interface{}, fp []string, val interface{}) error {
+func setAtFieldPath(m map[string]any, fp []string, val any) error {
 	m2, err := getParentMap(m, fp, true)
 	if err != nil {
 		return err
@@ -424,29 +529,21 @@ func setAtFieldPath(m map[string]interface{}, fp []string, val interface{}) erro
 	return nil
 }
 
-// Delete the value from m at the given field path, if it exists.
-func deleteAtFieldPath(m map[string]interface{}, fp []string) {
-	m2, _ := getParentMap(m, fp, false) // ignore error
-	if m2 != nil {
-		delete(m2, fp[len(fp)-1])
-	}
-}
-
 // getParentMap returns the map that directly contains the given field path;
 // that is, the value of m at the field path that excludes the last component
 // of fp. If a non-map is encountered along the way, an InvalidArgument error is
 // returned. If nil is encountered, nil is returned unless create is true, in
 // which case a map is added at that point.
-func getParentMap(m map[string]interface{}, fp []string, create bool) (map[string]interface{}, error) {
+func getParentMap(m map[string]any, fp []string, create bool) (map[string]any, error) {
 	var ok bool
 	for _, k := range fp[:len(fp)-1] {
 		if m[k] == nil {
 			if !create {
 				return nil, nil
 			}
-			m[k] = map[string]interface{}{}
+			m[k] = map[string]any{}
 		}
-		m, ok = m[k].(map[string]interface{})
+		m, ok = m[k].(map[string]any)
 		if !ok {
 			return nil, gcerr.Newf(gcerr.InvalidArgument, nil, "invalid field path %q at %q", strings.Join(fp, "."), k)
 		}
@@ -455,7 +552,7 @@ func getParentMap(m map[string]interface{}, fp []string, create bool) (map[strin
 }
 
 // RevisionToBytes implements driver.RevisionToBytes.
-func (c *collection) RevisionToBytes(rev interface{}) ([]byte, error) {
+func (c *collection) RevisionToBytes(rev any) ([]byte, error) {
 	r, ok := rev.(int64)
 	if !ok {
 		return nil, gcerr.Newf(gcerr.InvalidArgument, nil, "revision %v of type %[1]T is not an int64", rev)
@@ -464,15 +561,15 @@ func (c *collection) RevisionToBytes(rev interface{}) ([]byte, error) {
 }
 
 // BytesToRevision implements driver.BytesToRevision.
-func (c *collection) BytesToRevision(b []byte) (interface{}, error) {
+func (c *collection) BytesToRevision(b []byte) (any, error) {
 	return strconv.ParseInt(string(b), 10, 64)
 }
 
 // As implements driver.As.
-func (c *collection) As(i interface{}) bool { return false }
+func (c *collection) As(i any) bool { return false }
 
 // As implements driver.Collection.ErrorAs.
-func (c *collection) ErrorAs(err error, i interface{}) bool { return false }
+func (c *collection) ErrorAs(err error, i any) bool { return false }
 
 // Close implements driver.Collection.Close.
 // If the collection was created with a Filename option, Close writes the
@@ -484,11 +581,11 @@ func (c *collection) Close() error {
 	return saveDocs(c.opts.Filename, c.docs)
 }
 
-type mapOfDocs = map[interface{}]storedDoc
+type mapOfDocs = map[any]storedDoc
 
 // Read a map from the filename if is is not empty and the file exists.
 // Otherwise return an empty (not nil) map.
-func loadDocs(filename string) (mapOfDocs, error) {
+func loadDocs(filename string) (m mapOfDocs, err error) {
 	if filename == "" {
 		return mapOfDocs{}, nil
 	}
@@ -500,10 +597,13 @@ func loadDocs(filename string) (mapOfDocs, error) {
 		// If the file doesn't exist, return an empty map without error.
 		return mapOfDocs{}, nil
 	}
-	defer f.Close()
-	var m mapOfDocs
+	defer func() {
+		if e := f.Close(); e != nil && err == nil {
+			err = e
+		}
+	}()
 	if err := gob.NewDecoder(f).Decode(&m); err != nil {
-		return nil, fmt.Errorf("failed to decode from %q: %v", filename, err)
+		return nil, fmt.Errorf("failed to decode from %q: %w", filename, err)
 	}
 	return m, nil
 }
@@ -519,7 +619,7 @@ func saveDocs(filename string, m mapOfDocs) error {
 	}
 	if err := gob.NewEncoder(f).Encode(m); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("failed to encode to %q: %v", filename, err)
+		return fmt.Errorf("failed to encode to %q: %w", filename, err)
 	}
 	return f.Close()
 }

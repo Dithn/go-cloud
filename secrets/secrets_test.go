@@ -1,4 +1,4 @@
-// Copyright 2019 The Go Cloud Development Kit Authors
+// Copyright 2019-2025 The Go Cloud Development Kit Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,15 +17,15 @@ package secrets
 import (
 	"context"
 	"errors"
+	"io"
 	"net/url"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"gocloud.dev/gcerrors"
 	"gocloud.dev/internal/gcerr"
-	"gocloud.dev/internal/testing/octest"
+	"gocloud.dev/internal/testing/oteltest"
 	"gocloud.dev/secrets/driver"
 )
 
@@ -33,6 +33,7 @@ var errFake = errors.New("fake")
 
 type erroringKeeper struct {
 	driver.Keeper
+	closeErr error
 }
 
 func (k *erroringKeeper) Decrypt(ctx context.Context, b []byte) ([]byte, error) {
@@ -43,12 +44,12 @@ func (k *erroringKeeper) Encrypt(ctx context.Context, b []byte) ([]byte, error) 
 	return nil, errFake
 }
 
-func (k *erroringKeeper) Close() error                       { return errFake }
+func (k *erroringKeeper) Close() error                       { return k.closeErr }
 func (k *erroringKeeper) ErrorCode(error) gcerrors.ErrorCode { return gcerrors.Internal }
 
 func TestErrorsAreWrapped(t *testing.T) {
 	ctx := context.Background()
-	k := NewKeeper(&erroringKeeper{})
+	k := NewKeeper(&erroringKeeper{closeErr: errFake})
 
 	// verifyWrap ensures that err is wrapped exactly once.
 	verifyWrap := func(description string, err error) {
@@ -56,7 +57,7 @@ func TestErrorsAreWrapped(t *testing.T) {
 			t.Errorf("%s: got nil error, wanted non-nil", description)
 		} else if unwrapped, ok := err.(*gcerr.Error); !ok {
 			t.Errorf("%s: not wrapped: %v", description, err)
-		} else if du, ok := unwrapped.Unwrap().(*gcerr.Error); ok {
+		} else if du, ok := unwrapped.Unwrap()[0].(*gcerr.Error); ok {
 			t.Errorf("%s: double wrapped: %v", description, du)
 		}
 		if s := err.Error(); !strings.HasPrefix(s, "secrets ") {
@@ -74,12 +75,19 @@ func TestErrorsAreWrapped(t *testing.T) {
 	verifyWrap("Close", err)
 }
 
+func closeWithErrorCheck(t testing.TB, c io.Closer) {
+	t.Helper()
+	if err := c.Close(); err != nil {
+		t.Errorf("failed to Close: %v", err)
+	}
+}
+
 // TestKeeperIsClosed tests that Keeper functions return an error when the
 // Keeper is closed.
 func TestKeeperIsClosed(t *testing.T) {
 	ctx := context.Background()
 	k := NewKeeper(&erroringKeeper{})
-	k.Close()
+	closeWithErrorCheck(t, k)
 
 	if _, err := k.Decrypt(ctx, nil); err != errClosed {
 		t.Error(err)
@@ -92,28 +100,34 @@ func TestKeeperIsClosed(t *testing.T) {
 	}
 }
 
-func TestOpenCensus(t *testing.T) {
+func TestOpenTelemetry(t *testing.T) {
 	ctx := context.Background()
-	te := octest.NewTestExporter(OpenCensusViews)
-	defer te.Unregister()
-
+	te := oteltest.NewTestExporter(t, OpenTelemetryViews)
 	k := NewKeeper(&erroringKeeper{})
-	defer k.Close()
-	k.Encrypt(ctx, nil)
-	k.Decrypt(ctx, nil)
-	diff := octest.Diff(te.Spans(), te.Counts(), "gocloud.dev/secrets", "gocloud.dev/secrets", []octest.Call{
+	defer closeWithErrorCheck(t, k)
+
+	_, _ = k.Encrypt(ctx, nil)
+	_, _ = k.Decrypt(ctx, nil)
+	_, _ = k.Decrypt(ctx, nil)
+
+	// Check collected spans.
+	spanStubs := te.GetSpans()
+	metrics := te.GetMetrics(ctx)
+	diff := oteltest.Diff(spanStubs.Snapshots(), metrics, pkgName, "gocloud.dev/secrets", []oteltest.Call{
 		{Method: "Encrypt", Code: gcerrors.Internal},
+		{Method: "Decrypt", Code: gcerrors.Internal},
 		{Method: "Decrypt", Code: gcerrors.Internal},
 	})
 	if diff != "" {
 		t.Error(diff)
 	}
-}
 
-var (
-	testOpenOnce sync.Once
-	testOpenGot  *url.URL
-)
+	if err := te.Shutdown(ctx); err != nil {
+		// Just log and continue - not failing the test on shutdown errors.
+		t.Logf("OpenTelemetry shutdown error (non-fatal): %v", err)
+	}
+
+}
 
 func TestURLMux(t *testing.T) {
 	ctx := context.Background()
@@ -199,7 +213,7 @@ func TestURLMux(t *testing.T) {
 			if gotErr != nil {
 				return
 			}
-			defer keeper.Close()
+			defer closeWithErrorCheck(t, keeper)
 			if got := fake.u.String(); got != tc.url {
 				t.Errorf("got %q want %q", got, tc.url)
 			}
@@ -212,7 +226,7 @@ func TestURLMux(t *testing.T) {
 			if gotErr != nil {
 				t.Fatalf("got err %v, want nil", gotErr)
 			}
-			defer keeper.Close()
+			defer closeWithErrorCheck(t, keeper)
 			if got := fake.u.String(); got != tc.url {
 				t.Errorf("got %q want %q", got, tc.url)
 			}
@@ -221,7 +235,7 @@ func TestURLMux(t *testing.T) {
 }
 
 type fakeOpener struct {
-	u *url.URL // last url passed to OpenKeeperURL
+	u *url.URL // last url passed to OpenKeeperURL.
 }
 
 func (o *fakeOpener) OpenKeeperURL(ctx context.Context, u *url.URL) (*Keeper, error) {

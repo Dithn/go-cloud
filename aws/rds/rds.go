@@ -21,7 +21,6 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 
 	"github.com/google/wire"
@@ -41,7 +40,7 @@ type CertPoolProvider interface {
 }
 
 // caBundleURL is the URL to the public RDS Certificate Authority keys.
-const caBundleURL = "https://s3.amazonaws.com/rds-downloads/rds-combined-ca-bundle.pem"
+const caBundleURL = "https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem"
 
 // CertFetcher pulls the RDS CA certificates from Amazon's servers. The zero
 // value will fetch certificates using the default HTTP client.
@@ -66,24 +65,27 @@ func (cf *CertFetcher) RDSCertPool(ctx context.Context) (*x509.CertPool, error) 
 }
 
 // Fetch fetches the RDS CA certificates. It is safe to call from multiple goroutines.
-func (cf *CertFetcher) Fetch(ctx context.Context) ([]*x509.Certificate, error) {
+func (cf *CertFetcher) Fetch(ctx context.Context) (certs []*x509.Certificate, err error) {
 	client := cf.Client
 	if client == nil {
 		client = http.DefaultClient
 	}
 	resp, err := ctxhttp.Get(ctx, client, caBundleURL)
 	if err != nil {
-		return nil, fmt.Errorf("fetch RDS certificates: %v", err)
+		return nil, fmt.Errorf("fetch RDS certificates: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if e := resp.Body.Close(); e != nil && err == nil {
+			err = e
+		}
+	}()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetch RDS certificates: HTTP %s", resp.Status)
 	}
-	pemData, err := ioutil.ReadAll(&io.LimitedReader{R: resp.Body, N: 1 << 20}) // limit to 1MiB
+	pemData, err := io.ReadAll(&io.LimitedReader{R: resp.Body, N: 1 << 20}) // limit to 1MiB
 	if err != nil {
-		return nil, fmt.Errorf("fetch RDS certificates: %v", err)
+		return nil, fmt.Errorf("fetch RDS certificates: %w", err)
 	}
-	var certs []*x509.Certificate
 	for len(pemData) > 0 {
 		var block *pem.Block
 		block, pemData = pem.Decode(pemData)
@@ -95,7 +97,7 @@ func (cf *CertFetcher) Fetch(ctx context.Context) ([]*x509.Certificate, error) {
 		}
 		c, err := x509.ParseCertificate(block.Bytes)
 		if err != nil {
-			return nil, fmt.Errorf("fetch RDS certificates: %v", err)
+			return nil, fmt.Errorf("fetch RDS certificates: %w", err)
 		}
 		certs = append(certs, c)
 	}

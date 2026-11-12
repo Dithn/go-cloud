@@ -17,14 +17,13 @@
 // Use OpenCollection to construct a *docstore.Collection.
 //
 // Docstore types not supported by the Go firestore client, cloud.google.com/go/firestore:
-//  - unsigned integers: encoded is int64s
-//  - arrays: encoded as Firestore array values
+//   - unsigned integers: encoded is int64s
+//   - arrays: encoded as Firestore array values
 //
 // Firestore types not supported by Docstore:
-//  - Document reference (a pointer to another Firestore document)
+//   - Document reference (a pointer to another Firestore document)
 //
-//
-// URLs
+// # URLs
 //
 // For docstore.OpenCollection, gcpfirestore registers for the scheme
 // "firestore".
@@ -35,20 +34,18 @@
 // see URLOpener.
 // See https://gocloud.dev/concepts/urls/ for background information.
 //
-//
-// As
+// # As
 //
 // gcpfirestore exposes the following types for as functions.
 // The pb package is google.golang.org/genproto/googleapis/firestore/v1.
 // The firestore  package is cloud.google.com/go/firestore/apiv1.
-//  - Collection.As: *firestore.Client
-//  - ActionList.BeforeDo: *pb.BatchGetDocumentsRequest or *pb.CommitRequest.
-//  - Query.BeforeQuery: *pb.RunQueryRequest
-//  - DocumentIterator: firestore.Firestore_RunQueryClient
-//  - Error: *google.golang.org/grpc/status.Status
+//   - Collection.As: *firestore.Client
+//   - ActionList.BeforeDo: *pb.BatchGetDocumentsRequest or *pb.CommitRequest.
+//   - Query.BeforeQuery: *pb.RunQueryRequest
+//   - DocumentIterator: firestore.Firestore_RunQueryClient
+//   - Error: *google.golang.org/grpc/status.Status (note: does not work with errors.As, because it's not an error)
 //
-//
-// Queries
+// # Queries
 //
 // Firestore allows only one field in a query to be compared with an inequality
 // operator (one other than "="). This driver selects the first field in a Where
@@ -76,8 +73,7 @@ import (
 	"strings"
 
 	vkit "cloud.google.com/go/firestore/apiv1"
-	"github.com/golang/protobuf/proto"
-	tspb "github.com/golang/protobuf/ptypes/timestamp"
+	pb "cloud.google.com/go/firestore/apiv1/firestorepb"
 	"github.com/google/wire"
 	"gocloud.dev/docstore"
 	"gocloud.dev/docstore/driver"
@@ -86,10 +82,12 @@ import (
 	"gocloud.dev/internal/gcerr"
 	"gocloud.dev/internal/useragent"
 	"google.golang.org/api/option"
-	pb "google.golang.org/genproto/googleapis/firestore/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
+	tspb "google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // Dial returns a client to use with Firestore and a clean-up function to close
@@ -101,7 +99,8 @@ func Dial(ctx context.Context, ts gcp.TokenSource) (*vkit.Client, func(), error)
 		useragent.ClientOption("docstore"),
 	}
 	if host := os.Getenv("FIRESTORE_EMULATOR_HOST"); host != "" {
-		conn, err := grpc.DialContext(ctx, host, grpc.WithInsecure())
+		conn, err := grpc.DialContext(ctx, host,
+			grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -113,7 +112,7 @@ func Dial(ctx context.Context, ts gcp.TokenSource) (*vkit.Client, func(), error)
 		opts = append(opts, option.WithTokenSource(ts))
 	}
 	c, err := vkit.NewClient(ctx, opts...)
-	return c, func() { c.Close() }, err
+	return c, func() { _ = c.Close() }, err
 }
 
 // Set holds Wire providers for this package.
@@ -150,6 +149,12 @@ type Options struct {
 // See the OpenCollection example for use.
 func CollectionResourceID(projectID, collPath string) string {
 	return fmt.Sprintf("projects/%s/databases/(default)/documents/%s", projectID, collPath)
+}
+
+// CollectResoureceIDWithDatabase constructs a resource ID for a collection from the project ID, database ID, and the collection path.
+// See the OpenCollection example for use.
+func CollectionResourceIDWithDatabase(projectID, databaseID, collPath string) string {
+	return fmt.Sprintf("projects/%s/databases/%s/documents/%s", projectID, databaseID, collPath)
 }
 
 // OpenCollection creates a *docstore.Collection representing a Firestore collection.
@@ -196,7 +201,7 @@ func OpenCollectionWithNameFunc(client *vkit.Client, collResourceID string, name
 	return docstore.NewCollection(c), nil
 }
 
-var resourceIDRE = regexp.MustCompile(`^(projects/[^/]+/databases/\(default\))/documents/.+`)
+var resourceIDRE = regexp.MustCompile(`^(projects/[^/]+/databases/[^/]+)/documents/.+`)
 
 func newCollection(client *vkit.Client, collResourceID, nameField string, nameFunc func(docstore.Document) string, opts *Options) (*collection, error) {
 	if nameField == "" && nameFunc == nil {
@@ -226,7 +231,7 @@ func newCollection(client *vkit.Client, collResourceID, nameField string, nameFu
 
 // Key returns the document key, if present. This is either the value of the field
 // called c.nameField, or the result of calling c.nameFunc.
-func (c *collection) Key(doc driver.Document) (interface{}, error) {
+func (c *collection) Key(doc driver.Document) (any, error) {
 	if c.nameField != "" {
 		name, err := doc.GetField(c.nameField)
 		vn := reflect.ValueOf(name)
@@ -260,19 +265,28 @@ func (c *collection) RevisionField() string {
 // RunActions implements driver.RunActions.
 func (c *collection) RunActions(ctx context.Context, actions []*driver.Action, opts *driver.RunActionsOptions) driver.ActionListError {
 	errs := make([]error, len(actions))
-	beforeGets, gets, writes, afterGets := driver.GroupActions(actions)
+	beforeGets, gets, writes, writesTx, afterGets := driver.GroupActions(actions)
 	calls := c.buildCommitCalls(writes, errs)
+	atomicWritesCall := c.buildAtomicWritesCommitCall(writesTx, errs)
 	// runGets does not issue concurrent RPCs, so it doesn't need a throttle.
 	c.runGets(ctx, beforeGets, errs, opts)
 	t := driver.NewThrottle(c.opts.MaxOutstandingActionRPCs)
 	for _, call := range calls {
-		call := call
 		t.Acquire()
 		go func() {
 			defer t.Release()
 			c.doCommitCall(ctx, call, errs, opts)
 		}()
 	}
+	// commit the atomic writes
+	if atomicWritesCall != nil && len(atomicWritesCall.actions) > 0 {
+		t.Acquire()
+		go func() {
+			defer t.Release()
+			c.doCommitCall(ctx, atomicWritesCall, errs, opts)
+		}()
+	}
+
 	t.Acquire()
 	c.runGets(ctx, gets, errs, opts)
 	t.Release()
@@ -400,6 +414,23 @@ func (c *collection) buildCommitCalls(actions []*driver.Action, errs []error) []
 		return pCalls
 	}
 	return append(pCalls, nCall)
+}
+
+// Construct a commit call with all the atomic writes
+func (c *collection) buildAtomicWritesCommitCall(actions []*driver.Action, errs []error) *commitCall {
+	atomicWritesCommitCall := &commitCall{}
+	for _, a := range actions {
+		ws, nn, err := c.actionToWrites(a)
+		if err != nil {
+			errs[a.Index] = err
+			return nil
+		} else {
+			atomicWritesCommitCall.writes = append(atomicWritesCommitCall.writes, ws...)
+			atomicWritesCommitCall.actions = append(atomicWritesCommitCall.actions, a)
+			atomicWritesCommitCall.newNames = append(atomicWritesCommitCall.newNames, nn)
+		}
+	}
+	return atomicWritesCommitCall
 }
 
 // Convert an action to one or more Firestore Write protos.
@@ -599,7 +630,6 @@ func (c *collection) doCommitCall(ctx context.Context, call *commitCall, errs []
 			j++
 		}
 	}
-	return
 }
 
 func hasFollowingTransform(writes []*pb.Write, i int) bool {
@@ -662,7 +692,7 @@ func getParentMap(m map[string]*pb.Value, fp []string, create bool) (map[string]
 			if !create {
 				return nil, nil
 			}
-			m[k] = &pb.Value{ValueType: &pb.Value_MapValue{&pb.MapValue{Fields: map[string]*pb.Value{}}}}
+			m[k] = &pb.Value{ValueType: &pb.Value_MapValue{MapValue: &pb.MapValue{Fields: map[string]*pb.Value{}}}}
 		}
 		mv := m[k].GetMapValue()
 		if mv == nil {
@@ -742,7 +772,7 @@ func preconditionFromTimestamp(ts *tspb.Timestamp) *pb.Precondition {
 	if ts == nil || (ts.Seconds == 0 && ts.Nanos == 0) { // ignore a missing or zero revision
 		return nil
 	}
-	return &pb.Precondition{ConditionType: &pb.Precondition_UpdateTime{ts}}
+	return &pb.Precondition{ConditionType: &pb.Precondition_UpdateTime{UpdateTime: ts}}
 }
 
 func (c *collection) ErrorCode(err error) gcerrors.ErrorCode {
@@ -763,7 +793,7 @@ func withResourceHeader(ctx context.Context, resource string) context.Context {
 }
 
 // RevisionToBytes implements driver.RevisionToBytes.
-func (c *collection) RevisionToBytes(rev interface{}) ([]byte, error) {
+func (c *collection) RevisionToBytes(rev any) ([]byte, error) {
 	r, ok := rev.(*tspb.Timestamp)
 	if !ok {
 		return nil, gcerr.Newf(gcerr.InvalidArgument, nil, "revision %v of type %[1]T is not a proto Timestamp", rev)
@@ -772,7 +802,7 @@ func (c *collection) RevisionToBytes(rev interface{}) ([]byte, error) {
 }
 
 // BytesToRevision implements driver.BytesToRevision.
-func (c *collection) BytesToRevision(b []byte) (interface{}, error) {
+func (c *collection) BytesToRevision(b []byte) (any, error) {
 	var ts tspb.Timestamp
 	if err := proto.Unmarshal(b, &ts); err != nil {
 		return nil, err
@@ -780,7 +810,7 @@ func (c *collection) BytesToRevision(b []byte) (interface{}, error) {
 	return &ts, nil
 }
 
-func (c *collection) As(i interface{}) bool {
+func (c *collection) As(i any) bool {
 	p, ok := i.(**vkit.Client)
 	if !ok {
 		return false
@@ -790,7 +820,7 @@ func (c *collection) As(i interface{}) bool {
 }
 
 // ErrorAs implements driver.Collection.ErrorAs.
-func (c *collection) ErrorAs(err error, i interface{}) bool {
+func (c *collection) ErrorAs(err error, i any) bool {
 	s, ok := status.FromError(err)
 	if !ok {
 		return false

@@ -17,7 +17,6 @@ package fileblob_test
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -32,7 +31,7 @@ func ExampleOpenBucket() {
 
 	// The directory you pass to fileblob.OpenBucket must exist first.
 	const myDir = "path/to/local/directory"
-	if err := os.MkdirAll(myDir, 0777); err != nil {
+	if err := os.MkdirAll(myDir, 0o777); err != nil {
 		log.Fatal(err)
 	}
 
@@ -41,16 +40,16 @@ func ExampleOpenBucket() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer bucket.Close()
+	defer func() { _ = bucket.Close() }()
 }
 
 func Example_openBucketFromURL() {
 	// Create a temporary directory.
-	dir, err := ioutil.TempDir("", "go-cloud-fileblob-example")
+	dir, err := os.MkdirTemp("", "go-cloud-fileblob-example")
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 
 	// On Unix, append the dir to "file://".
 	// On Windows, convert "\" to "/" and add a leading "/":
@@ -65,7 +64,7 @@ func Example_openBucketFromURL() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	// Now we can use b to read or write files to the container.
 	err = b.WriteAll(ctx, "my-key", []byte("hello world"), nil)

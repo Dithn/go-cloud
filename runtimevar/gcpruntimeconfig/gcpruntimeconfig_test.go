@@ -55,6 +55,8 @@ type harness struct {
 }
 
 func newHarness(t *testing.T) (drivertest.Harness, error) {
+	t.Helper()
+
 	ctx := context.Background()
 	conn, done := setup.NewGCPgRPCConn(ctx, t, endPoint, "runtimevar")
 	client := pb.NewRuntimeConfigManagerClient(conn)
@@ -178,7 +180,11 @@ func TestNoConnectionError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer v.Close()
+	defer func() {
+		if err := v.Close(); err != nil {
+			t.Errorf("failed to Close: %v", err)
+		}
+	}()
 	_, err = v.Watch(context.Background())
 	if err == nil {
 		t.Error("got nil want error")
@@ -215,13 +221,21 @@ func TestOpenVariable(t *testing.T) {
 		{"gcpruntimeconfig://myproject/mycfg/myvar?decoder=notadecoder", true},
 		// Invalid param.
 		{"gcpruntimeconfig://myproject/mycfg/myvar?param=value", true},
+		// OK, setting wait.
+		{"gcpruntimeconfig://projects/myproject/configs/mycfg/variables/myvar?wait=1m", false},
+		// Invalid wait.
+		{"gcpruntimeconfig://projects/myproject/configs/mycfg/variables/myvar?wait=xx", true},
 	}
 
 	ctx := context.Background()
 	for _, test := range tests {
 		v, err := runtimevar.OpenVariable(ctx, test.URL)
 		if v != nil {
-			defer v.Close()
+			defer func() {
+				if err := v.Close(); err != nil {
+					t.Errorf("failed to Close: %v", err)
+				}
+			}()
 		}
 		if (err != nil) != test.WantErr {
 			t.Errorf("%s: got error %v, want error %v", test.URL, err, test.WantErr)

@@ -58,7 +58,7 @@ func (o *lazyCredsOpener) OpenCollectionURL(ctx context.Context, u *url.URL) (*d
 		o.opener = &URLOpener{Client: client}
 	})
 	if o.err != nil {
-		return nil, fmt.Errorf("open collection %s: %v", u, o.err)
+		return nil, fmt.Errorf("open collection %s: %w", u, o.err)
 	}
 	return o.opener.OpenCollectionURL(ctx, u)
 }
@@ -75,6 +75,7 @@ const Scheme = "firestore"
 // The following query parameters are supported:
 //
 //   - name_field (required): gcpfirestore requires that a single string field,
+//
 // name_field, be designated the primary key. Its values must be unique over all
 // documents in the collection, and the primary key must be provided to retrieve
 // a document.

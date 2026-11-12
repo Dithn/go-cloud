@@ -15,7 +15,7 @@
 // Package azuremysql provides connections to Azure Database for MySQL.
 // See https://docs.microsoft.com/en-us/azure/mysql.
 //
-// URLs
+// # URLs
 //
 // For mysql.Open, azuremysql registers for the scheme "azuremysql".
 // To customize the URL opener, or for more details on the URL format,
@@ -32,9 +32,8 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
-	"sync"
 
-	"contrib.go.opencensus.io/integrations/ocsql"
+	"github.com/XSAM/otelsql"
 	"github.com/go-sql-driver/mysql"
 	"gocloud.dev/azure/azuredb"
 	cdkmysql "gocloud.dev/mysql"
@@ -46,8 +45,8 @@ type URLOpener struct {
 	// CertSource specifies how the opener will obtain the Azure Certificate
 	// Authority. If nil, it will use the default *azuredb.CertFetcher.
 	CertSource azuredb.CertPoolProvider
-	// TraceOpts contains options for OpenCensus.
-	TraceOpts []ocsql.TraceOption
+	// TraceOpts contains options for OpenTelemetry.
+	TraceOpts []otelsql.Option
 }
 
 // Scheme is the URL scheme azuremysql registers its URLOpener under on
@@ -69,33 +68,28 @@ func (uo *URLOpener) OpenMySQLURL(ctx context.Context, u *url.URL) (*sql.DB, err
 	}
 	password, _ := u.User.Password()
 	c := &connector{
-		addr:     u.Host,
-		user:     u.User.Username(),
-		password: password,
-		dbName:   strings.TrimPrefix(u.Path, "/"),
-		// Make a copy of TraceOpts to avoid caller modifying.
-		traceOpts: append([]ocsql.TraceOption(nil), uo.TraceOpts...),
-		provider:  source,
-
-		sem:   make(chan struct{}, 1),
-		ready: make(chan struct{}),
+		cfg: &mysql.Config{
+			Net:                     "tcp",
+			Addr:                    u.Host,
+			User:                    u.User.Username(),
+			Passwd:                  password,
+			AllowCleartextPasswords: true,
+			AllowNativePasswords:    true,
+			DBName:                  strings.TrimPrefix(u.Path, "/"),
+		},
+		provider: source,
+		sem:      make(chan struct{}, 1),
+		ready:    make(chan struct{}),
 	}
 	c.sem <- struct{}{}
-	return sql.OpenDB(c), nil
+	return otelsql.OpenDB(c, uo.TraceOpts...), nil
 }
 
 type connector struct {
-	addr      string
-	user      string
-	password  string
-	dbName    string
-	traceOpts []ocsql.TraceOption
-
 	sem      chan struct{}    // receive to acquire, send to release
 	provider CertPoolProvider // provides the CA certificate pool
-
-	ready chan struct{} // closed after writing dsn
-	dsn   string
+	ready    chan struct{}    // closed after fetching certs successfully
+	cfg      *mysql.Config
 }
 
 func (c *connector) Connect(ctx context.Context) (driver.Conn, error) {
@@ -104,50 +98,25 @@ func (c *connector) Connect(ctx context.Context) (driver.Conn, error) {
 		certPool, err := c.provider.AzureCertPool(ctx)
 		if err != nil {
 			c.sem <- struct{}{} // release
-			return nil, fmt.Errorf("connect Azure MySql: %v", err)
+			return nil, fmt.Errorf("connect Azure MySql: %w", err)
 		}
-
-		// TODO(light): Avoid global registry once https://github.com/go-sql-driver/mysql/issues/771 is fixed.
-		tlsConfigCounter.mu.Lock()
-		tlsConfigNum := tlsConfigCounter.n
-		tlsConfigCounter.n++
-		tlsConfigCounter.mu.Unlock()
-		tlsConfigName := fmt.Sprintf("gocloud.dev/mysql/azuremysql/%d", tlsConfigNum)
-		err = mysql.RegisterTLSConfig(tlsConfigName, &tls.Config{
-			RootCAs: certPool,
-		})
-		if err != nil {
-			c.sem <- struct{}{} // release
-			return nil, fmt.Errorf("connect Azure MySql: register TLS: %v", err)
-		}
-		cfg := &mysql.Config{
-			Net:                     "tcp",
-			Addr:                    c.addr,
-			User:                    c.user,
-			Passwd:                  c.password,
-			TLSConfig:               tlsConfigName,
-			AllowCleartextPasswords: true,
-			AllowNativePasswords:    true,
-			DBName:                  c.dbName,
-		}
-		c.dsn = cfg.FormatDSN()
+		c.cfg.TLS = &tls.Config{RootCAs: certPool}
 		close(c.ready)
 		// Don't release sem: make it block forever, so this case won't be run again.
 	case <-c.ready:
 		// Already succeeded.
 	case <-ctx.Done():
-		return nil, fmt.Errorf("connect Azure MySql: waiting for certificates: %v", ctx.Err())
+		return nil, fmt.Errorf("connect Azure MySql: waiting for certificates: %w", ctx.Err())
 	}
-	return c.Driver().Open(c.dsn)
+	inner, err := mysql.NewConnector(c.cfg)
+	if err != nil {
+		return nil, fmt.Errorf("connect Azure MySql: create connector: %w", err)
+	}
+	return inner.Connect(ctx)
 }
 
 func (c *connector) Driver() driver.Driver {
-	return ocsql.Wrap(mysql.MySQLDriver{}, c.traceOpts...)
-}
-
-var tlsConfigCounter struct {
-	mu sync.Mutex
-	n  int
+	return mysql.MySQLDriver{}
 }
 
 // A CertPoolProvider obtains a certificate pool that contains the Azure CA certificate.

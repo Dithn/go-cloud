@@ -31,7 +31,7 @@ import (
 	"gocloud.dev/server/requestlog"
 )
 
-func ExampleServer_New() {
+func ExampleServer() {
 	// PRAGMA: This example is used on gocloud.dev; PRAGMA comments adjust how it is shown and can be ignored.
 
 	// Use the constructor function to create the server.
@@ -39,7 +39,7 @@ func ExampleServer_New() {
 
 	// Register a route.
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, "Hello, World!")
+		_, _ = fmt.Fprintln(w, "Hello, World!")
 	})
 
 	// Start the server. If ListenAndServe returns an error, print it and exit.
@@ -48,7 +48,7 @@ func ExampleServer_New() {
 	}
 }
 
-func ExampleServer_RequestLogger() {
+func ExampleServer_withRequestLogger() {
 	// PRAGMA: This example is used on gocloud.dev; PRAGMA comments adjust how it is shown and can be ignored.
 
 	// Create a logger, and assign it to the RequestLogger field of a
@@ -62,7 +62,7 @@ func ExampleServer_RequestLogger() {
 
 	// Register a route.
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, "Hello, World!")
+		_, _ = fmt.Fprintln(w, "Hello, World!")
 	})
 
 	// Start the server. You will see requests logged to STDOUT.
@@ -91,7 +91,8 @@ func (h *customHealthCheck) CheckHealth() error {
 	}
 	return nil
 }
-func ExampleServer_HealthChecks() {
+
+func ExampleServer_withHealthChecks() {
 	// PRAGMA: This example is used on gocloud.dev; PRAGMA comments adjust how it is shown and can be ignored.
 
 	// Create a health.Checker from the type we defined for our application.
@@ -116,7 +117,7 @@ func ExampleServer_HealthChecks() {
 
 	// Register a route.
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, "Hello, World!")
+		_, _ = fmt.Fprintln(w, "Hello, World!")
 	})
 
 	// Start the server. You will see requests logged to STDOUT.
@@ -148,13 +149,13 @@ func ExampleServer_Shutdown() {
 		// before ListenAndServe starts.
 		for {
 			<-interrupt
-			srv.Shutdown(context.Background())
+			_ = srv.Shutdown(context.Background())
 		}
 	}()
 
 	// Register a route.
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, "Hello, World!")
+		_, _ = fmt.Fprintln(w, "Hello, World!")
 	})
 
 	// Start the server. You will see requests logged to STDOUT.

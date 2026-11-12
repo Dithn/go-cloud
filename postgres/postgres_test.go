@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
 	"net/url"
 	"os"
 	"os/exec"
@@ -47,15 +46,9 @@ func TestOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir, err := ioutil.TempDir("", "gocloud_postgres_test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := os.RemoveAll(dir); err != nil {
-			t.Errorf("Cleaning up: %v", err)
-		}
-	}()
+
+	dir := t.TempDir()
+
 	dataDir := filepath.Join(dir, "data")
 	initdbCmd := exec.Command(initdbPath, "-U", currUser.Username, "-D", dataDir)
 	initdbOutput := new(bytes.Buffer)
@@ -72,12 +65,12 @@ func TestOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(socketDir, 0777); err != nil {
+	if err := os.Mkdir(socketDir, 0o777); err != nil {
 		t.Fatal(err)
 	}
 	confData := new(bytes.Buffer)
 	fmt.Fprintf(confData, "unix_socket_directories = '%s'\n", socketDir)
-	err = ioutil.WriteFile(filepath.Join(dataDir, "postgresql.conf"), confData.Bytes(), 0666)
+	err = os.WriteFile(filepath.Join(dataDir, "postgresql.conf"), confData.Bytes(), 0o666)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +91,7 @@ func TestOpen(t *testing.T) {
 			}
 		}
 		// Wait for server to exit, but ignore the expected failure error code.
-		server.Wait()
+		_ = server.Wait()
 		if t.Failed() {
 			t.Log(serverOutput)
 		}
@@ -134,6 +127,8 @@ func TestOpen(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Error("Close:", err)
 	}
-	server.Process.Signal(os.Interrupt)
+	if err := server.Process.Signal(os.Interrupt); err != nil {
+		t.Error("Signal:", err)
+	}
 	serverSignaled = true
 }

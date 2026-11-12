@@ -23,13 +23,12 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/Shopify/sarama"
+	"github.com/IBM/sarama"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"gocloud.dev/internal/testing/setup"
@@ -152,7 +151,10 @@ func (asTest) SubscriptionCheck(sub *pubsub.Subscription) error {
 func (asTest) TopicErrorCheck(t *pubsub.Topic, err error) error {
 	var pe sarama.ProducerErrors
 	if !t.ErrorAs(err, &pe) {
-		return fmt.Errorf("failed to convert %v (%T)", err, err)
+		return fmt.Errorf("failed to convert %w (%T)", err, err)
+	}
+	if !errors.As(err, &pe) {
+		return fmt.Errorf("failed to use errors.As to convert %w (%T)", err, err)
 	}
 	return nil
 }
@@ -160,7 +162,10 @@ func (asTest) TopicErrorCheck(t *pubsub.Topic, err error) error {
 func (asTest) SubscriptionErrorCheck(s *pubsub.Subscription, err error) error {
 	var ke sarama.KError
 	if !s.ErrorAs(err, &ke) {
-		return fmt.Errorf("failed to convert %v (%T)", err, err)
+		return fmt.Errorf("failed to convert %w (%T)", err, err)
+	}
+	if !errors.As(err, &ke) {
+		return fmt.Errorf("failed to use errors.As to convert %w (%T)", err, err)
 	}
 	return nil
 }
@@ -173,7 +178,7 @@ func (asTest) MessageCheck(m *pubsub.Message) error {
 	return nil
 }
 
-func (asTest) BeforeSend(as func(interface{}) bool) error {
+func (asTest) BeforeSend(as func(any) bool) error {
 	var pm *sarama.ProducerMessage
 	if !as(&pm) {
 		return fmt.Errorf("cast failed for %T", &pm)
@@ -181,7 +186,7 @@ func (asTest) BeforeSend(as func(interface{}) bool) error {
 	return nil
 }
 
-func (asTest) AfterSend(as func(interface{}) bool) error {
+func (asTest) AfterSend(as func(any) bool) error {
 	return nil
 }
 
@@ -232,7 +237,7 @@ func TestKafkaKey(t *testing.T) {
 			keyName: keyValue,
 		},
 		Body: []byte("hello world"),
-		BeforeSend: func(as func(interface{}) bool) error {
+		BeforeSend: func(as func(any) bool) error {
 			// Verify that the Key field was set correctly on the outgoing Kafka
 			// message.
 			var pm *sarama.ProducerMessage
@@ -241,7 +246,7 @@ func TestKafkaKey(t *testing.T) {
 			}
 			gotKeyBytes, err := pm.Key.Encode()
 			if err != nil {
-				return fmt.Errorf("failed to Encode Kafka Key: %v", err)
+				return fmt.Errorf("failed to Encode Kafka Key: %w", err)
 			}
 			if gotKey := string(gotKeyBytes); gotKey != keyValue {
 				return errors.New("Kafka key wasn't set appropriately")
@@ -455,24 +460,19 @@ func BenchmarkKafka(b *testing.B) {
 	drivertest.RunBenchmarks(b, topic, sub)
 }
 
-func fakeConnectionStringInEnv() func() {
-	oldEnvVal := os.Getenv("KAFKA_BROKERS")
-	os.Setenv("KAFKA_BROKERS", "localhost:10000")
-	return func() {
-		os.Setenv("KAFKA_BROKERS", oldEnvVal)
-	}
-}
-
 func TestOpenTopicFromURL(t *testing.T) {
-	cleanup := fakeConnectionStringInEnv()
-	defer cleanup()
+	t.Setenv("KAFKA_BROKERS", "localhost:10000")
 
 	tests := []struct {
 		URL     string
 		WantErr bool
 	}{
-		// OK, but still error because broker doesn't exist.
-		{"kafka://mytopic", true},
+		// OK.
+		{"kafka://mytopic", false},
+		// OK, specifying key_name.
+		{"kafka://mytopic?key_name=x-partition-key", false},
+		// Invalid key_name value.
+		{"kafka://mytopic?key_name=", true},
 		// Invalid parameter.
 		{"kafka://mytopic?param=value", true},
 	}
@@ -480,6 +480,13 @@ func TestOpenTopicFromURL(t *testing.T) {
 	ctx := context.Background()
 	for _, test := range tests {
 		topic, err := pubsub.OpenTopic(ctx, test.URL)
+		if err != nil && errors.Is(err, sarama.ErrOutOfBrokers) {
+			// Since we don't have a real kafka broker to talk to, we will always get an error when
+			// opening a topic. This test is checking specifically for query parameter usage, so
+			// we treat the "no brokers" error message as a nil error.
+			err = nil
+		}
+
 		if (err != nil) != test.WantErr {
 			t.Errorf("%s: got error %v, want error %v", test.URL, err, test.WantErr)
 		}
@@ -490,30 +497,28 @@ func TestOpenTopicFromURL(t *testing.T) {
 }
 
 func TestOpenSubscriptionFromURL(t *testing.T) {
-	cleanup := fakeConnectionStringInEnv()
-	defer cleanup()
+	t.Setenv("KAFKA_BROKERS", "localhost:10000")
 
 	tests := []struct {
 		URL     string
 		WantErr bool
 	}{
-		// OK, but still error because broker doesn't exist.
+		// OK.
 		{"kafka://mygroup?topic=mytopic", false},
-		// OK, specifying initial offset, but still error because broker doesn't exist.
+		// OK, specifying initial offset.
 		{"kafka://mygroup?topic=mytopic&offset=oldest", false},
 		{"kafka://mygroup?topic=mytopic&offset=newest", false},
-		// Invalid offset specified
+		// Invalid offset specified.
 		{"kafka://mygroup?topic=mytopic&offset=value", true},
 		// Invalid parameter.
 		{"kafka://mygroup?topic=mytopic&param=value", true},
 	}
 
 	ctx := context.Background()
-	const ignore = "kafka: client has run out of available brokers to talk to (Is your cluster reachable?)"
 
 	for _, test := range tests {
 		sub, err := pubsub.OpenSubscription(ctx, test.URL)
-		if err != nil && err.Error() == ignore {
+		if err != nil && errors.Is(err, sarama.ErrOutOfBrokers) {
 			// Since we don't have a real kafka broker to talk to, we will always get an error when
 			// opening a subscription. This test is checking specifically for query parameter usage, so
 			// we treat the "no brokers" error message as a nil error.

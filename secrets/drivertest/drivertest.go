@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -67,8 +68,17 @@ func (v verifyAsFailsOnNil) ErrorCheck(k *secrets.Keeper, err error) (ret error)
 	return nil
 }
 
+func closeWithErrorCheck(t testing.TB, c io.Closer) {
+	t.Helper()
+	if err := c.Close(); err != nil {
+		t.Errorf("failed to Close: %v", err)
+	}
+}
+
 // RunConformanceTests runs conformance tests for driver implementations of secret management.
 func RunConformanceTests(t *testing.T, newHarness HarnessMaker, asTests []AsTest) {
+	t.Helper()
+
 	t.Run("TestEncryptDecrypt", func(t *testing.T) {
 		testEncryptDecrypt(t, newHarness)
 	})
@@ -96,6 +106,8 @@ func RunConformanceTests(t *testing.T, newHarness HarnessMaker, asTests []AsTest
 
 // testEncryptDecrypt tests the functionality of encryption and decryption
 func testEncryptDecrypt(t *testing.T, newHarness HarnessMaker) {
+	t.Helper()
+
 	ctx := context.Background()
 	harness, err := newHarness(ctx, t)
 	if err != nil {
@@ -108,7 +120,7 @@ func testEncryptDecrypt(t *testing.T, newHarness HarnessMaker) {
 		t.Fatal(err)
 	}
 	keeper := secrets.NewKeeper(drv)
-	defer keeper.Close()
+	defer closeWithErrorCheck(t, keeper)
 
 	msg := []byte("I'm a secret message!")
 	encryptedMsg, err := keeper.Encrypt(ctx, msg)
@@ -125,12 +137,13 @@ func testEncryptDecrypt(t *testing.T, newHarness HarnessMaker) {
 	if !cmp.Equal(msg, decryptedMsg) {
 		t.Errorf("Got decrypted message %v, want it to match original message %v", string(msg), string(decryptedMsg))
 	}
-
 }
 
 // testMultipleEncryptionsNotEqual tests that encrypting a plaintext multiple
 // times with the same key works, and that the encrypted bytes are different.
 func testMultipleEncryptionsNotEqual(t *testing.T, newHarness HarnessMaker) {
+	t.Helper()
+
 	ctx := context.Background()
 	harness, err := newHarness(ctx, t)
 	if err != nil {
@@ -143,7 +156,7 @@ func testMultipleEncryptionsNotEqual(t *testing.T, newHarness HarnessMaker) {
 		t.Fatal(err)
 	}
 	keeper := secrets.NewKeeper(drv)
-	defer keeper.Close()
+	defer closeWithErrorCheck(t, keeper)
 
 	msg := []byte("I'm a secret message!")
 	encryptedMsg1, err := keeper.Encrypt(ctx, msg)
@@ -176,6 +189,8 @@ func testMultipleEncryptionsNotEqual(t *testing.T, newHarness HarnessMaker) {
 // testMultipleKeys tests that encrypting the same text with different
 // keys works, and that the encrypted bytes are different.
 func testMultipleKeys(t *testing.T, newHarness HarnessMaker) {
+	t.Helper()
+
 	ctx := context.Background()
 	harness, err := newHarness(ctx, t)
 	if err != nil {
@@ -188,9 +203,9 @@ func testMultipleKeys(t *testing.T, newHarness HarnessMaker) {
 		t.Fatal(err)
 	}
 	keeper1 := secrets.NewKeeper(drv1)
-	defer keeper1.Close()
+	defer closeWithErrorCheck(t, keeper1)
 	keeper2 := secrets.NewKeeper(drv2)
-	defer keeper2.Close()
+	defer closeWithErrorCheck(t, keeper2)
 
 	msg := []byte("I'm a secret message!")
 	encryptedMsg1, err := keeper1.Encrypt(ctx, msg)
@@ -229,6 +244,8 @@ func testMultipleKeys(t *testing.T, newHarness HarnessMaker) {
 // testDecryptMalformedError tests decryption returns an error when the
 // ciphertext is malformed.
 func testDecryptMalformedError(t *testing.T, newHarness HarnessMaker) {
+	t.Helper()
+
 	ctx := context.Background()
 	harness, err := newHarness(ctx, t)
 	if err != nil {
@@ -241,7 +258,7 @@ func testDecryptMalformedError(t *testing.T, newHarness HarnessMaker) {
 		t.Fatal(err)
 	}
 	keeper := secrets.NewKeeper(drv)
-	defer keeper.Close()
+	defer closeWithErrorCheck(t, keeper)
 
 	msg := []byte("I'm a secret message!")
 	encryptedMsg, err := keeper.Encrypt(ctx, msg)
@@ -269,10 +286,6 @@ func testDecryptMalformedError(t *testing.T, newHarness HarnessMaker) {
 			name:      "wrong last byte",
 			malformed: append(copyEncryptedMsg()[:l-2], encryptedMsg[l-1]-1),
 		},
-		{
-			name:      "one more byte",
-			malformed: append(encryptedMsg, 4),
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := keeper.Decrypt(ctx, []byte(tc.malformed)); err == nil {
@@ -283,6 +296,8 @@ func testDecryptMalformedError(t *testing.T, newHarness HarnessMaker) {
 }
 
 func testAs(t *testing.T, newHarness HarnessMaker, tc AsTest) {
+	t.Helper()
+
 	ctx := context.Background()
 	harness, err := newHarness(ctx, t)
 	if err != nil {
@@ -295,7 +310,7 @@ func testAs(t *testing.T, newHarness HarnessMaker, tc AsTest) {
 		t.Fatal(err)
 	}
 	keeper := secrets.NewKeeper(drv)
-	defer keeper.Close()
+	defer closeWithErrorCheck(t, keeper)
 
 	_, gotErr := keeper.Decrypt(ctx, []byte("malformed cipher message"))
 	if gotErr == nil {

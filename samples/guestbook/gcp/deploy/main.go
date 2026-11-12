@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
@@ -62,24 +61,24 @@ func deploy(guestbookDir, tfStatePath string) error {
 	}
 	var tfState state
 	if err := json.Unmarshal(tfStateb, &tfState); err != nil {
-		return fmt.Errorf("parsing terraform state JSON: %v", err)
+		return fmt.Errorf("parsing terraform state JSON: %w", err)
 	}
 	zone := tfState.ClusterZone.Value
 	if zone == "" {
 		return fmt.Errorf("empty or missing cluster_zone in %s", tfStatePath)
 	}
-	tempDir, err := ioutil.TempDir("", "guestbook-k8s-")
+	tempDir, err := os.MkdirTemp("", "guestbook-k8s-")
 	if err != nil {
-		return fmt.Errorf("making temp dir: %v", err)
+		return fmt.Errorf("making temp dir: %w", err)
 	}
 	defer os.RemoveAll(tempDir)
 
 	// Fill in Kubernetes template parameters.
 	proj := strings.Replace(tfState.Project.Value, ":", "/", -1)
 	imageName := fmt.Sprintf("gcr.io/%s/guestbook", proj)
-	gbyin, err := ioutil.ReadFile(filepath.Join(guestbookDir, "gcp", "guestbook.yaml.in"))
+	gbyin, err := os.ReadFile(filepath.Join(guestbookDir, "gcp", "guestbook.yaml.in"))
 	if err != nil {
-		return fmt.Errorf("reading guestbook.yaml.in: %v", err)
+		return fmt.Errorf("reading guestbook.yaml.in: %w", err)
 	}
 	gby := string(gbyin)
 	replacements := map[string]string{
@@ -93,8 +92,8 @@ func deploy(guestbookDir, tfStatePath string) error {
 	for old, new := range replacements {
 		gby = strings.Replace(gby, old, new, -1)
 	}
-	if err := ioutil.WriteFile(filepath.Join(tempDir, "guestbook.yaml"), []byte(gby), 0666); err != nil {
-		return fmt.Errorf("writing guestbook.yaml: %v", err)
+	if err := os.WriteFile(filepath.Join(tempDir, "guestbook.yaml"), []byte(gby), 0o666); err != nil {
+		return fmt.Errorf("writing guestbook.yaml: %w", err)
 	}
 
 	// Build Guestbook Docker image.
@@ -105,17 +104,17 @@ func deploy(guestbookDir, tfStatePath string) error {
 	build.Env = env
 	absDir, err := filepath.Abs(guestbookDir)
 	if err != nil {
-		return fmt.Errorf("getting abs path to guestbook dir (%s): %v", guestbookDir, err)
+		return fmt.Errorf("getting abs path to guestbook dir (%s): %w", guestbookDir, err)
 	}
 	build.Dir = absDir
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
-		return fmt.Errorf("building guestbook app by running %v: %v", build.Args, err)
+		return fmt.Errorf("building guestbook app by running %v: %w", build.Args, err)
 	}
 	gcp := gcloud{projectID: tfState.Project.Value}
 	cbs := gcp.cmd("builds", "submit", "-t", imageName, filepath.Join(guestbookDir, "gcp"))
 	if err := cbs.Run(); err != nil {
-		return fmt.Errorf("building container image with %v: %v", cbs.Args, err)
+		return fmt.Errorf("building container image with %v: %w", cbs.Args, err)
 	}
 
 	// Run on Kubernetes.
@@ -123,7 +122,7 @@ func deploy(guestbookDir, tfStatePath string) error {
 	getCreds := gcp.cmd("container", "clusters", "get-credentials", "--zone", zone, tfState.ClusterName.Value)
 	getCreds.Stderr = os.Stderr
 	if err := getCreds.Run(); err != nil {
-		return fmt.Errorf("getting credentials with %v: %v", getCreds.Args, err)
+		return fmt.Errorf("getting credentials with %v: %w", getCreds.Args, err)
 	}
 	kubeCmds := [][]string{
 		{"kubectl", "apply", "-f", filepath.Join(tempDir, "guestbook.yaml")},
@@ -134,7 +133,7 @@ func deploy(guestbookDir, tfStatePath string) error {
 	for _, kcmd := range kubeCmds {
 		cmd := exec.Command(kcmd[0], kcmd[1:]...)
 		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("running %v: %v", cmd.Args, err)
+			return fmt.Errorf("running %v: %w", cmd.Args, err)
 		}
 	}
 
@@ -147,7 +146,7 @@ func deploy(guestbookDir, tfStatePath string) error {
 		}
 		var s service
 		if err := json.Unmarshal(outb, &s); err != nil {
-			return fmt.Errorf("parsing JSON output: %v", err)
+			return fmt.Errorf("parsing JSON output: %w", err)
 		}
 		i := s.Status.LoadBalancer.Ingress
 		if len(i) == 0 || i[0].IP == "" {
@@ -163,10 +162,12 @@ func deploy(guestbookDir, tfStatePath string) error {
 	return nil
 }
 
-type service struct{ Status *status }
-type status struct{ LoadBalancer loadBalancer }
-type loadBalancer struct{ Ingress []ingress }
-type ingress struct{ IP string }
+type (
+	service      struct{ Status *status }
+	status       struct{ LoadBalancer loadBalancer }
+	loadBalancer struct{ Ingress []ingress }
+	ingress      struct{ IP string }
+)
 
 type gcloud struct {
 	projectID string
@@ -191,7 +192,7 @@ func runb(args ...string) (stdout []byte, err error) {
 	cmd.Env = append(cmd.Env, os.Environ()...)
 	stdoutb, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("running %v: %v", cmd.Args, err)
+		return nil, fmt.Errorf("running %v: %w", cmd.Args, err)
 	}
 	return stdoutb, nil
 }

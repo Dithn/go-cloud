@@ -17,6 +17,7 @@ package constantvar
 import (
 	"context"
 	"errors"
+	"io"
 	"testing"
 	"time"
 
@@ -26,12 +27,21 @@ import (
 	"gocloud.dev/runtimevar/drivertest"
 )
 
+func closeWithErrorCheck(t testing.TB, c io.Closer) {
+	t.Helper()
+	if err := c.Close(); err != nil {
+		t.Errorf("failed to Close: %v", err)
+	}
+}
+
 type harness struct {
 	// vars stores the variable value(s) that have been set using CreateVariable.
 	vars map[string][]byte
 }
 
 func newHarness(t *testing.T) (drivertest.Harness, error) {
+	t.Helper()
+
 	return &harness{vars: map[string][]byte{}}, nil
 }
 
@@ -98,7 +108,7 @@ func TestNew(t *testing.T) {
 	// Use New with an error value; it should be plumbed through as a Value.
 	errFail := errors.New("fail")
 	v := New(errFail)
-	defer v.Close()
+	defer closeWithErrorCheck(t, v)
 	val, err := v.Watch(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -114,7 +124,7 @@ func TestNewBytes(t *testing.T) {
 
 	// Decode succeeds.
 	v := NewBytes([]byte(content), runtimevar.StringDecoder)
-	defer v.Close()
+	defer closeWithErrorCheck(t, v)
 	val, err := v.Watch(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -126,7 +136,36 @@ func TestNewBytes(t *testing.T) {
 	// Decode fails.
 	var jsonData []string
 	v = NewBytes([]byte(content), runtimevar.NewDecoder(jsonData, runtimevar.JSONDecode))
-	defer v.Close()
+	defer closeWithErrorCheck(t, v)
+	val, err = v.Watch(ctx)
+	if err == nil {
+		t.Errorf("got nil error and %v, want error", val)
+	}
+}
+
+func TestNewFromEnv(t *testing.T) {
+	ctx := context.Background()
+	const (
+		content = "hello world"
+		name    = "RUNTIMEVAR_CONST_TEST"
+	)
+	t.Setenv(name, content)
+
+	// Decode succeeds.
+	v := NewFromEnv(name, runtimevar.StringDecoder)
+	defer closeWithErrorCheck(t, v)
+	val, err := v.Watch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if val.Value != content {
+		t.Errorf("got %v want %v", val.Value, content)
+	}
+
+	// Decode fails.
+	var jsonData []string
+	v = NewFromEnv(name, runtimevar.NewDecoder(jsonData, runtimevar.JSONDecode))
+	defer closeWithErrorCheck(t, v)
 	val, err = v.Watch(ctx)
 	if err == nil {
 		t.Errorf("got nil error and %v, want error", val)
@@ -137,7 +176,7 @@ func TestNewError(t *testing.T) {
 	ctx := context.Background()
 
 	v := NewError(errors.New("fail"))
-	defer v.Close()
+	defer closeWithErrorCheck(t, v)
 	_, err := v.Watch(ctx)
 	if err == nil {
 		t.Errorf("got nil err want fail err")
@@ -145,11 +184,12 @@ func TestNewError(t *testing.T) {
 }
 
 func TestOpenVariable(t *testing.T) {
+	t.Setenv("RUNTIMEVAR_CONST_TEST", "hello world")
 	tests := []struct {
 		URL          string
 		WantErr      bool
 		WantWatchErr bool
-		Want         interface{}
+		Want         any
 	}{
 		// Empty URL results in empty byte slice.
 		{"constant://", false, false, []byte("")},
@@ -158,7 +198,9 @@ func TestOpenVariable(t *testing.T) {
 		// String value.
 		{"constant://?val=hello+world&decoder=string", false, false, "hello world"},
 		// JSON value; val parameter is {"Foo": "Bar"}, URL-encoded.
-		{"constant://?val=%7B%22Foo%22%3A%22Bar%22%7d&decoder=jsonmap", false, false, &map[string]interface{}{"Foo": "Bar"}},
+		{"constant://?val=%7B%22Foo%22%3A%22Bar%22%7d&decoder=jsonmap", false, false, &map[string]any{"Foo": "Bar"}},
+		// Environment variable value.
+		{"constant://?envvar=RUNTIMEVAR_CONST_TEST&decoder=string", false, false, "hello world"},
 		// Error.
 		{"constant://?err=fail", false, true, nil},
 		// Invalid decoder.
@@ -175,7 +217,7 @@ func TestOpenVariable(t *testing.T) {
 			if err != nil {
 				return
 			}
-			defer v.Close()
+			defer closeWithErrorCheck(t, v)
 			snapshot, err := v.Watch(ctx)
 			if (err != nil) != test.WantWatchErr {
 				t.Errorf("%s: got Watch error %v, want error %v", test.URL, err, test.WantWatchErr)

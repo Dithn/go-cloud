@@ -16,7 +16,7 @@
 // Secrets Engine of Vault by Hashicorp.
 // Use OpenKeeper to construct a *secrets.Keeper.
 //
-// URLs
+// # URLs
 //
 // For secrets.OpenKeeper, hashivault registers for the scheme "hashivault".
 // The default URL opener will dial a Vault server using the environment variables
@@ -25,7 +25,7 @@
 // see URLOpener.
 // See https://gocloud.dev/concepts/urls/ for background information.
 //
-// As
+// # As
 //
 // hashivault does not support any types for As.
 package hashivault
@@ -38,6 +38,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"strings"
 	"sync"
 
 	"github.com/hashicorp/vault/api"
@@ -126,13 +127,13 @@ func (o *defaultDialer) OpenKeeperURL(ctx context.Context, u *url.URL) (*secrets
 		cfg := Config{Token: token, APIConfig: api.Config{Address: serverURL}}
 		client, err := Dial(ctx, &cfg)
 		if err != nil {
-			o.err = fmt.Errorf("failed to Dial default Vault server at %q: %v", serverURL, err)
+			o.err = fmt.Errorf("failed to Dial default Vault server at %q: %w", serverURL, err)
 			return
 		}
 		o.opener = &URLOpener{Client: client}
 	})
 	if o.err != nil {
-		return nil, fmt.Errorf("open keeper %v: %v", u, o.err)
+		return nil, fmt.Errorf("open keeper %v: %w", u, o.err)
 	}
 	return o.opener.OpenKeeperURL(ctx, u)
 }
@@ -197,12 +198,13 @@ type keeper struct {
 
 // Decrypt decrypts the ciphertext into a plaintext.
 func (k *keeper) Decrypt(ctx context.Context, ciphertext []byte) ([]byte, error) {
-	out, err := k.client.Logical().Write(
-		path.Join(k.opts.Engine+"/decrypt", k.keyID),
-		map[string]interface{}{
-			"ciphertext": string(ciphertext),
-		},
-	)
+	p, err := vaultPath(k.opts.Engine+"/decrypt", k.keyID)
+	if err != nil {
+		return nil, err
+	}
+	out, err := k.client.Logical().Write(p, map[string]any{
+		"ciphertext": string(ciphertext),
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -211,23 +213,39 @@ func (k *keeper) Decrypt(ctx context.Context, ciphertext []byte) ([]byte, error)
 
 // Encrypt encrypts a plaintext into a ciphertext.
 func (k *keeper) Encrypt(ctx context.Context, plaintext []byte) ([]byte, error) {
-	secret, err := k.client.Logical().Write(
-		path.Join(k.opts.Engine+"/encrypt", k.keyID),
-		map[string]interface{}{
-			"plaintext": plaintext,
-		},
-	)
+	p, err := vaultPath(k.opts.Engine+"/encrypt", k.keyID)
+	if err != nil {
+		return nil, err
+	}
+	secret, err := k.client.Logical().Write(p, map[string]any{
+		"plaintext": plaintext,
+	})
 	if err != nil {
 		return nil, err
 	}
 	return []byte(secret.Data["ciphertext"].(string)), nil
 }
 
+// vaultPath joins prefix and keyID into a Vault API path, and verifies that
+// the result is actually inside prefix. path.Join cleans ".." segments, so a
+// keyID such as "../../sys/health" would otherwise silently make the request
+// escape the intended secrets engine and operation (decrypt vs. encrypt) --
+// something Vault's own path-prefix-scoped ACL policies can't defend against,
+// since as far as Vault is concerned it's simply the path the client asked
+// for.
+func vaultPath(prefix, keyID string) (string, error) {
+	p := path.Join(prefix, keyID)
+	if p != prefix && !strings.HasPrefix(p, prefix+"/") {
+		return "", fmt.Errorf("hashivault: keyID %q escapes the %q path", keyID, prefix)
+	}
+	return p, nil
+}
+
 // Close implements driver.Keeper.Close.
 func (k *keeper) Close() error { return nil }
 
 // ErrorAs implements driver.Keeper.ErrorAs.
-func (k *keeper) ErrorAs(err error, i interface{}) bool {
+func (k *keeper) ErrorAs(err error, i any) bool {
 	return false
 }
 

@@ -16,6 +16,7 @@ package pubsub_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -48,10 +49,12 @@ func TestTopicShutdownCanBeCanceledEvenWithHangingSend(t *testing.T) {
 	}
 	topic := pubsub.NewTopic(dt, nil)
 
+	errs := make(chan error, 1)
+
 	go func() {
 		m := &pubsub.Message{}
 		if err := topic.Send(context.Background(), m); err == nil {
-			t.Fatal("nil err from Send, expected context cancellation error")
+			errs <- errors.New("nil err from Send, expected context cancellation error")
 		}
 	}()
 
@@ -59,7 +62,9 @@ func TestTopicShutdownCanBeCanceledEvenWithHangingSend(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancel()
 	go func() {
-		topic.Shutdown(ctx)
+		if err := topic.Shutdown(ctx); err == nil {
+			t.Error("expected cancellation error during Shutdown")
+		}
 		close(done)
 	}()
 
@@ -72,6 +77,8 @@ func TestTopicShutdownCanBeCanceledEvenWithHangingSend(t *testing.T) {
 	case <-done:
 	case <-time.After(tooLong):
 		t.Fatalf("waited too long(%v) for Shutdown(ctx) to run", tooLong)
+	case err := <-errs:
+		t.Fatalf("got error from goroutine: %v", err)
 	}
 }
 
@@ -79,7 +86,9 @@ func TestTopicCloseIsCalled(t *testing.T) {
 	ctx := context.Background()
 	dt := &funcTopic{}
 	topic := pubsub.NewTopic(dt, nil)
-	topic.Shutdown(ctx)
+	if err := topic.Shutdown(ctx); err != nil {
+		t.Errorf("Shutdown failed: %v", err)
+	}
 	if !dt.closed {
 		t.Error("want Topic.Close to have been called")
 	}

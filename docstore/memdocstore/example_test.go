@@ -29,7 +29,7 @@ func ExampleOpenCollection() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer coll.Close()
+	defer func() { _ = coll.Close() }()
 	// PRAGMA: On gocloud.dev, hide lines until the next blank line.
 	// Output:
 }
@@ -43,7 +43,7 @@ func ExampleOpenCollectionWithKeyFunc() {
 	}
 
 	// The name of a document is constructed from the Game and Player fields.
-	nameFromDocument := func(doc docstore.Document) interface{} {
+	nameFromDocument := func(doc docstore.Document) any {
 		hs := doc.(*HighScore)
 		return hs.Game + "|" + hs.Player
 	}
@@ -52,7 +52,7 @@ func ExampleOpenCollectionWithKeyFunc() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer coll.Close()
+	defer func() { _ = coll.Close() }()
 	// PRAGMA: On gocloud.dev, hide lines until the next blank line.
 	// Output:
 }
@@ -68,7 +68,7 @@ func Example_openCollectionFromURL() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer coll.Close()
+	defer func() { _ = coll.Close() }()
 	// PRAGMA: On gocloud.dev, hide lines until the next blank line.
 	// Output:
 }

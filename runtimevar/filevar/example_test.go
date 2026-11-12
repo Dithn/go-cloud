@@ -17,8 +17,8 @@ package filevar_test
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"log"
+	"os"
 
 	"gocloud.dev/runtimevar"
 	"gocloud.dev/runtimevar/filevar"
@@ -26,7 +26,7 @@ import (
 
 func ExampleOpenVariable() {
 	// Create a temporary file to hold our config.
-	f, err := ioutil.TempFile("", "")
+	f, err := os.CreateTemp("", "")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func ExampleOpenVariable() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer v.Close()
+	defer func() { _ = v.Close() }()
 
 	// We can now read the current value of the variable from v.
 	snapshot, err := v.Latest(context.Background())
@@ -65,5 +65,5 @@ func Example_openVariableFromURL() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer v.Close()
+	defer func() { _ = v.Close() }()
 }

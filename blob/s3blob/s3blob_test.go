@@ -19,14 +19,16 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"testing"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/aws/client"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/service/s3/s3manager"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awscfg "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
+	gcaws "gocloud.dev/aws"
 	"gocloud.dev/blob"
 	"gocloud.dev/blob/driver"
 	"gocloud.dev/blob/drivertest"
@@ -36,30 +38,37 @@ import (
 // These constants record the region & bucket used for the last --record.
 // If you want to use --record mode,
 // 1. Create a bucket in your AWS project from the S3 management console.
-//    https://s3.console.aws.amazon.com/s3/home.
+//
+//	https://s3.console.aws.amazon.com/s3/home.
+//
 // 2. Update this constant to your bucket name.
 // TODO(issue #300): Use Terraform to provision a bucket, and get the bucket
-//    name from the Terraform output instead (saving a copy of it for replay).
+//
+//	name from the Terraform output instead (saving a copy of it for replay).
 const (
-	bucketName = "go-cloud-testing"
+	bucketName = "go-cloud-testing-2"
 	region     = "us-west-1"
 )
 
 type harness struct {
-	session *session.Session
-	opts    *Options
-	rt      http.RoundTripper
-	closer  func()
+	client *s3.Client
+	opts   *Options
+	rt     http.RoundTripper
+	closer func()
 }
 
 func newHarness(ctx context.Context, t *testing.T) (drivertest.Harness, error) {
-	sess, rt, done, _ := setup.NewAWSSession(ctx, t, region)
-	return &harness{session: sess, opts: nil, rt: rt, closer: done}, nil
+	t.Helper()
+
+	cfg, rt, done, _ := setup.NewAWSv2Config(ctx, t, region, false)
+	return &harness{client: s3.NewFromConfig(cfg), opts: nil, rt: rt, closer: done}, nil
 }
 
 func newHarnessUsingLegacyList(ctx context.Context, t *testing.T) (drivertest.Harness, error) {
-	sess, rt, done, _ := setup.NewAWSSession(ctx, t, region)
-	return &harness{session: sess, opts: &Options{UseLegacyList: true}, rt: rt, closer: done}, nil
+	t.Helper()
+
+	cfg, rt, done, _ := setup.NewAWSv2Config(ctx, t, region, false)
+	return &harness{client: s3.NewFromConfig(cfg), opts: &Options{UseLegacyList: true}, rt: rt, closer: done}, nil
 }
 
 func (h *harness) HTTPClient() *http.Client {
@@ -67,12 +76,18 @@ func (h *harness) HTTPClient() *http.Client {
 }
 
 func (h *harness) MakeDriver(ctx context.Context) (driver.Bucket, error) {
-	return openBucket(ctx, h.session, bucketName, h.opts)
+	return openBucket(ctx, h.client, bucketName, h.opts)
 }
 
 func (h *harness) MakeDriverForNonexistentBucket(ctx context.Context) (driver.Bucket, error) {
-	return openBucket(ctx, h.session, "bucket-does-not-exist", h.opts)
+	return openBucket(ctx, h.client, "go-cdk-bucket-does-not-exist", h.opts)
 }
+
+func (*harness) SupportsCopy() bool               { return true }
+func (*harness) SupportsNonSlashDelimiters() bool { return true }
+
+// TODO(rvangent): Clean up once we have an S3 account and can update goldens.
+func (*harness) SkipDownloadAt() bool { return true }
 
 func (h *harness) Close() {
 	h.closer()
@@ -87,13 +102,13 @@ func TestConformanceUsingLegacyList(t *testing.T) {
 }
 
 func BenchmarkS3blob(b *testing.B) {
-	sess, err := session.NewSession(&aws.Config{
-		Region: aws.String(region),
-	})
+	ctx := context.Background()
+	cfg, err := awscfg.LoadDefaultConfig(ctx)
 	if err != nil {
 		b.Fatal(err)
 	}
-	bkt, err := OpenBucket(context.Background(), sess, bucketName, nil)
+	client := s3.NewFromConfig(cfg)
+	bkt, err := OpenBucket(ctx, client, bucketName, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -102,7 +117,7 @@ func BenchmarkS3blob(b *testing.B) {
 
 const language = "nl"
 
-// verifyContentLanguage uses As to access the underlying GCS types and
+// verifyContentLanguage uses As to access the underlying AWS types and
 // read/write the ContentLanguage field.
 type verifyContentLanguage struct {
 	usingLegacyList bool
@@ -112,44 +127,49 @@ func (verifyContentLanguage) Name() string {
 	return "verify ContentLanguage can be written and read through As"
 }
 
-func (verifyContentLanguage) BucketCheck(b *blob.Bucket) error {
-	var client *s3.S3
+func (v verifyContentLanguage) BucketCheck(b *blob.Bucket) error {
+	var client *s3.Client
 	if !b.As(&client) {
 		return errors.New("Bucket.As failed")
 	}
 	return nil
 }
 
-func (verifyContentLanguage) ErrorCheck(b *blob.Bucket, err error) error {
-	var e awserr.Error
+func (v verifyContentLanguage) ErrorCheck(b *blob.Bucket, err error) error {
+	var e smithy.APIError
 	if !b.ErrorAs(err, &e) {
 		return errors.New("blob.ErrorAs failed")
+	}
+	if !errors.As(err, &e) {
+		return errors.New("error.As failed")
 	}
 	return nil
 }
 
-func (verifyContentLanguage) BeforeRead(as func(interface{}) bool) error {
-	var req *s3.GetObjectInput
-	if !as(&req) {
+func (v verifyContentLanguage) BeforeRead(as func(any) bool) error {
+	var (
+		req  *s3.GetObjectInput
+		opts *[]func(*s3.Options)
+	)
+	if !as(&req) || !as(&opts) {
 		return errors.New("BeforeRead As failed")
 	}
 	return nil
 }
 
-func (verifyContentLanguage) BeforeWrite(as func(interface{}) bool) error {
-	var req *s3manager.UploadInput
-	if !as(&req) {
-		return errors.New("Writer.As failed for UploadInput")
+func (v verifyContentLanguage) BeforeWrite(as func(any) bool) error {
+	var (
+		req *transfermanager.UploadObjectInput
+		tm  *transfermanager.Client
+	)
+	if !as(&req) || !as(&tm) {
+		return errors.New("Writer.As failed")
 	}
 	req.ContentLanguage = aws.String(language)
-	var u *s3manager.Uploader
-	if !as(&u) {
-		return errors.New("Writer.As failed for Uploader")
-	}
 	return nil
 }
 
-func (verifyContentLanguage) BeforeCopy(as func(interface{}) bool) error {
+func (v verifyContentLanguage) BeforeCopy(as func(any) bool) error {
 	var in *s3.CopyObjectInput
 	if !as(&in) {
 		return errors.New("BeforeCopy.As failed")
@@ -157,23 +177,34 @@ func (verifyContentLanguage) BeforeCopy(as func(interface{}) bool) error {
 	return nil
 }
 
-func (v verifyContentLanguage) BeforeList(as func(interface{}) bool) error {
+func (v verifyContentLanguage) BeforeDelete(as func(any) bool) error {
+	var in *s3.DeleteObjectInput
+	if !as(&in) {
+		return errors.New("BeforeDelete.As failed")
+	}
+	return nil
+}
+
+func (v verifyContentLanguage) BeforeList(as func(any) bool) error {
 	if v.usingLegacyList {
 		var req *s3.ListObjectsInput
 		if !as(&req) {
 			return errors.New("List.As failed")
 		}
 	} else {
-		var req *s3.ListObjectsV2Input
-		if !as(&req) {
+		var (
+			list *s3.ListObjectsV2Input
+			opts *[]func(*s3.Options)
+		)
+		if !as(&list) || !as(&opts) {
 			return errors.New("List.As failed")
 		}
+		return nil
 	}
-	// Nothing to do.
 	return nil
 }
 
-func (v verifyContentLanguage) BeforeSign(as func(interface{}) bool) error {
+func (v verifyContentLanguage) BeforeSign(as func(any) bool) error {
 	var (
 		get *s3.GetObjectInput
 		put *s3.PutObjectInput
@@ -185,7 +216,7 @@ func (v verifyContentLanguage) BeforeSign(as func(interface{}) bool) error {
 	return errors.New("BeforeSign.As failed")
 }
 
-func (verifyContentLanguage) AttributesCheck(attrs *blob.Attributes) error {
+func (v verifyContentLanguage) AttributesCheck(attrs *blob.Attributes) error {
 	var hoo s3.HeadObjectOutput
 	if !attrs.As(&hoo) {
 		return errors.New("Attributes.As returned false")
@@ -196,7 +227,7 @@ func (verifyContentLanguage) AttributesCheck(attrs *blob.Attributes) error {
 	return nil
 }
 
-func (verifyContentLanguage) ReaderCheck(r *blob.Reader) error {
+func (v verifyContentLanguage) ReaderCheck(r *blob.Reader) error {
 	var goo s3.GetObjectOutput
 	if !r.As(&goo) {
 		return errors.New("Reader.As returned false")
@@ -207,22 +238,21 @@ func (verifyContentLanguage) ReaderCheck(r *blob.Reader) error {
 	return nil
 }
 
-func (verifyContentLanguage) ListObjectCheck(o *blob.ListObject) error {
+func (v verifyContentLanguage) ListObjectCheck(o *blob.ListObject) error {
 	if o.IsDir {
-		var commonPrefix s3.CommonPrefix
+		var commonPrefix types.CommonPrefix
 		if !o.As(&commonPrefix) {
 			return errors.New("ListObject.As for directory returned false")
 		}
 		return nil
 	}
-	var obj s3.Object
+	var obj types.Object
 	if !o.As(&obj) {
 		return errors.New("ListObject.As for object returned false")
 	}
 	if obj.Key == nil || o.Key != *obj.Key {
 		return errors.New("ListObject.As for object returned a different item")
 	}
-	// Nothing to check.
 	return nil
 }
 
@@ -230,7 +260,7 @@ func TestOpenBucket(t *testing.T) {
 	tests := []struct {
 		description string
 		bucketName  string
-		nilSession  bool
+		nilClient   bool
 		want        string
 		wantErr     bool
 	}{
@@ -239,9 +269,9 @@ func TestOpenBucket(t *testing.T) {
 			wantErr:     true,
 		},
 		{
-			description: "nil sess results in error",
+			description: "nil client results in error",
 			bucketName:  "foo",
-			nilSession:  true,
+			nilClient:   true,
 			wantErr:     true,
 		},
 		{
@@ -254,15 +284,15 @@ func TestOpenBucket(t *testing.T) {
 	ctx := context.Background()
 	for _, test := range tests {
 		t.Run(test.description, func(t *testing.T) {
-			var sess client.ConfigProvider
-			if !test.nilSession {
-				var done func()
-				sess, _, done, _ = setup.NewAWSSession(ctx, t, region)
+			var client *s3.Client
+			if !test.nilClient {
+				cfg, _, done, _ := setup.NewAWSv2Config(ctx, t, region, false)
 				defer done()
+				client = s3.NewFromConfig(cfg)
 			}
 
 			// Create driver impl.
-			drv, err := openBucket(ctx, sess, test.bucketName, nil)
+			drv, err := openBucket(ctx, client, test.bucketName, nil)
 			if (err != nil) != test.wantErr {
 				t.Errorf("got err %v want error %v", err, test.wantErr)
 			}
@@ -271,9 +301,13 @@ func TestOpenBucket(t *testing.T) {
 			}
 
 			// Create portable type.
-			b, err := OpenBucket(ctx, sess, test.bucketName, nil)
+			b, err := OpenBucket(ctx, client, test.bucketName, nil)
 			if b != nil {
-				defer b.Close()
+				defer func(b *blob.Bucket) {
+					if err := b.Close(); err != nil {
+						t.Errorf("failed to Close: %v", err)
+					}
+				}(b)
 			}
 			if (err != nil) != test.wantErr {
 				t.Errorf("got err %v want error %v", err, test.wantErr)
@@ -291,12 +325,58 @@ func TestOpenBucketFromURL(t *testing.T) {
 		{"s3://mybucket", false},
 		// OK, setting region.
 		{"s3://mybucket?region=us-west1", false},
-		// OK, setting profile.
-		{"s3://mybucket?profile=main", false},
-		// OK, setting both profile and region.
-		{"s3://mybucket?profile=main&region=us-west-1", false},
+		// OK, use KMS Server Side Encryption
+		{"s3://mybucket?ssetype=aws:kms&kmskeyid=arn:aws:us-east-1:12345:key/1-a-2-b", false},
+		// OK, use S3 Transfer acceleration and dual stack endpoints
+		{"s3://mybucket?accelerate=true&dualstack=true", false},
+		// OK, use FIPS endpoints
+		{"s3://mybucket?fips=true", false},
+		// OK, use S3 Transfer accleration and dual stack endpoints
+		{"s3://mybucket?accelerate=true&dualstack=true", false},
+		// OK, use use_path_style
+		{"s3://mybucket?use_path_style=true", false},
+		// OK, use s3ForcePathStyle
+		{"s3://mybucket?s3ForcePathStyle=true", false},
+		// OK, use disable_https
+		{"s3://mybucket?disable_https=true", false},
+		// OK, use FIPS endpoints
+		{"s3://mybucket?fips=true", false},
+		// OK, use anonymous.
+		{"s3://mybucket?anonymous=true", false},
+		// OK, use request checksum calculation when_supported
+		{"s3://mybucket?request_checksum_calculation=when_supported", false},
+		// OK, use request checksum calculation when_required
+		{"s3://mybucket?request_checksum_calculation=when_required", false},
+		// OK, use response checksum validation when_supported
+		{"s3://mybucket?response_checksum_validation=when_supported", false},
+		// OK, use response checksum validation when_required
+		{"s3://mybucket?response_checksum_validation=when_required", false},
+		// OK, use both checksum parameters
+		{"s3://mybucket?request_checksum_calculation=when_required&response_checksum_validation=when_supported", false},
+		// OK, case insensitive checksum parameters
+		{"s3://mybucket?request_checksum_calculation=WHEN_SUPPORTED&response_checksum_validation=When_Required", false},
+		// Invalid request checksum value
+		{"s3://mybucket?request_checksum_calculation=invalid", true},
+		// Invalid response checksum value
+		{"s3://mybucket?response_checksum_validation=invalid", true},
+		// Empty request checksum value
+		{"s3://mybucket?request_checksum_calculation=", true},
+		// Empty response checksum value
+		{"s3://mybucket?response_checksum_validation=", true},
+		// Invalid accelerate
+		{"s3://mybucket?accelerate=bogus", true},
+		// Invalid FIPS
+		{"s3://mybucket?fips=bogus", true},
+		// Invalid dualstack
+		{"s3://mybucket?dualstack=bad", true},
+		// Invalid ssetype
+		{"s3://mybucket?ssetype=aws:notkmsoraes&kmskeyid=arn:aws:us-east-1:12345:key/1-a-2-b", true},
 		// Invalid parameter together with a valid one.
 		{"s3://mybucket?profile=main&param=value", true},
+		// Invalid use_path_style
+		{"s3://mybucket?usePathStyle=bad", true},
+		// Invalid disable_https
+		{"s3://mybucket?usePathStyle=bad", true},
 		// Invalid parameter.
 		{"s3://mybucket?param=value", true},
 	}
@@ -305,10 +385,162 @@ func TestOpenBucketFromURL(t *testing.T) {
 	for _, test := range tests {
 		b, err := blob.OpenBucket(ctx, test.URL)
 		if b != nil {
-			defer b.Close()
+			defer func(b *blob.Bucket) {
+				if err := b.Close(); err != nil {
+					t.Errorf("failed to Close: %v", err)
+				}
+			}(b)
 		}
 		if (err != nil) != test.WantErr {
 			t.Errorf("%s: got error %v, want error %v", test.URL, err, test.WantErr)
+		}
+	}
+}
+
+func TestChecksumConfigurationPassthrough(t *testing.T) {
+	// Test that checksum configuration from URL parameters is properly passed through
+	// to the S3 bucket options
+	tests := []struct {
+		name                           string
+		url                            string
+		wantRequestChecksumCalculation aws.RequestChecksumCalculation
+		wantErr                        bool
+	}{
+		{
+			name:                           "request checksum when_supported",
+			url:                            "s3://mybucket?request_checksum_calculation=when_supported",
+			wantRequestChecksumCalculation: aws.RequestChecksumCalculationWhenSupported,
+		},
+		{
+			name:                           "request checksum when_required",
+			url:                            "s3://mybucket?request_checksum_calculation=when_required",
+			wantRequestChecksumCalculation: aws.RequestChecksumCalculationWhenRequired,
+		},
+		{
+			name:                           "case insensitive",
+			url:                            "s3://mybucket?request_checksum_calculation=WHEN_SUPPORTED",
+			wantRequestChecksumCalculation: aws.RequestChecksumCalculationWhenSupported,
+		},
+		{
+			name:    "invalid value",
+			url:     "s3://mybucket?request_checksum_calculation=invalid",
+			wantErr: true,
+		},
+	}
+
+	ctx := context.Background()
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// Parse the URL to extract the bucket name and query parameters
+			u, err := url.Parse(test.url)
+			if err != nil {
+				t.Fatalf("failed to parse URL: %v", err)
+			}
+
+			// Create a mock AWS config with the query parameters
+			cfg, err := awscfg.LoadDefaultConfig(ctx)
+			if err != nil {
+				t.Fatalf("failed to load AWS config: %v", err)
+			}
+
+			// Apply URL parameters to the config
+			cfg, err = gcaws.V2ConfigFromURLParams(ctx, u.Query())
+			if (err != nil) != test.wantErr {
+				t.Errorf("got err %v want error %v", err, test.wantErr)
+				return
+			}
+			if err != nil {
+				return
+			}
+
+			// Create URLOpener to test the integration
+			opener := &URLOpener{}
+			bucket, err := opener.OpenBucketURL(ctx, u)
+			if err != nil {
+				t.Fatalf("failed to open bucket: %v", err)
+			}
+			defer func() {
+				if err := bucket.Close(); err != nil {
+					t.Errorf("failed to Close: %v", err)
+				}
+			}()
+
+			// Verify that the checksum configuration was applied
+			// We can't directly access the internal bucket struct, but we can verify
+			// that the configuration was applied to the AWS config
+			if cfg.RequestChecksumCalculation != test.wantRequestChecksumCalculation {
+				t.Errorf("got RequestChecksumCalculation %v, want %v",
+					cfg.RequestChecksumCalculation, test.wantRequestChecksumCalculation)
+			}
+		})
+	}
+}
+
+func TestRequestChecksumCalculation(t *testing.T) {
+	ctx := context.Background()
+	for description, enumValue := range map[string]aws.RequestChecksumCalculation{
+		"WhenRequired":  aws.RequestChecksumCalculationWhenRequired,
+		"WhenSupported": aws.RequestChecksumCalculationWhenSupported} {
+		t.Run(description, func(t *testing.T) {
+
+			key := "checksum-calc-" + description
+			keyValue := "anything"
+
+			h, err := newHarness(ctx, t)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer h.Close()
+
+			h.(*harness).opts = &Options{RequestChecksumCalculation: enumValue}
+			drv, err := h.MakeDriver(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b := blob.NewBucket(drv)
+			defer func() {
+				if err := b.Close(); err != nil {
+					t.Errorf("failed to close: %v", err)
+				}
+			}()
+			if err := b.WriteAll(ctx, key, []byte(keyValue), nil); err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := b.Delete(ctx, key); err != nil {
+					t.Errorf("failed to delete key %q: %v", key, err)
+				}
+			}()
+		})
+	}
+
+}
+
+func TestToServerSideEncryptionType(t *testing.T) {
+	tests := []struct {
+		value         string
+		sseType       types.ServerSideEncryption
+		expectedError error
+	}{
+		// OK.
+		{"AES256", types.ServerSideEncryptionAes256, nil},
+		// OK, KMS
+		{"aws:kms", types.ServerSideEncryptionAwsKms, nil},
+		// OK, KMS
+		{"aws:kms:dsse", types.ServerSideEncryptionAwsKmsDsse, nil},
+		// OK, AES256 mixed case
+		{"Aes256", types.ServerSideEncryptionAes256, nil},
+		// Invalid SSE type
+		{"invalid", "", fmt.Errorf("'invalid' is not a valid value for %q", sseTypeParamKey)},
+	}
+
+	for _, test := range tests {
+		sseType, err := toServerSideEncryptionType(test.value)
+		if ((err != nil) != (test.expectedError != nil)) && err.Error() != test.expectedError.Error() {
+			t.Errorf("%s: got error \"%v\", want error \"%v\"", test.value, err, test.expectedError)
+		}
+		if sseType != test.sseType {
+			t.Errorf("%s: got type %v, want type %v", test.value, sseType, test.sseType)
 		}
 	}
 }

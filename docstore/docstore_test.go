@@ -16,6 +16,8 @@ package docstore
 
 import (
 	"context"
+	"errors"
+	"io"
 	"reflect"
 	"testing"
 	"time"
@@ -37,24 +39,30 @@ type Name struct {
 }
 
 func TestIsIncNumber(t *testing.T) {
-	for _, x := range []interface{}{int(1), 'x', uint(1), byte(1), float32(1), float64(1), time.Duration(1)} {
+	for _, x := range []any{int(1), 'x', uint(1), byte(1), float32(1), float64(1), time.Duration(1)} {
 		if !isIncNumber(x) {
 			t.Errorf("%v: got false, want true", x)
 		}
 	}
-	for _, x := range []interface{}{1 + 1i, "3", time.Time{}} {
+	for _, x := range []any{1 + 1i, "3", time.Time{}} {
 		if isIncNumber(x) {
 			t.Errorf("%v: got true, want false", x)
 		}
 	}
 }
 
+func closeWithErrorCheck(t *testing.T, c io.Closer) {
+	if err := c.Close(); err != nil {
+		t.Errorf("failed to close: %v", err)
+	}
+}
+
 func TestActionsDo(t *testing.T) {
 	c := newCollection(fakeDriverCollection{})
-	defer c.Close()
-	dn := map[string]interface{}{"key": nil}
-	d1 := map[string]interface{}{"key": 1}
-	d2 := map[string]interface{}{"key": 2}
+	defer closeWithErrorCheck(t, c)
+	dn := map[string]any{"key": nil}
+	d1 := map[string]any{"key": 1}
+	d2 := map[string]any{"key": 2}
 	dsn := &Book{}
 	ds1 := &Book{Title: "The Master and Margarita"}
 	ds2 := &Book{Title: "The Martian"}
@@ -118,15 +126,12 @@ func TestClosedErrors(t *testing.T) {
 
 	check := func(err error) {
 		t.Helper()
-		if alerr, ok := err.(ActionListError); ok {
-			err = alerr.Unwrap()
-		}
-		if err != errClosed {
+		if !errors.Is(err, errClosed) {
 			t.Errorf("got %v, want errClosed", err)
 		}
 	}
 
-	doc := map[string]interface{}{"key": "k"}
+	doc := map[string]any{"key": "k"}
 	check(c.Close())
 	check(c.Actions().Create(doc).Do(ctx))
 	check(c.Create(ctx, doc))
@@ -142,7 +147,7 @@ func TestClosedErrors(t *testing.T) {
 	// in the middle of the iteration.
 	c = NewCollection(fakeDriverCollection{})
 	iter = c.Query().Get(ctx)
-	c.Close()
+	closeWithErrorCheck(t, c)
 	check(iter.Next(ctx, doc))
 }
 
@@ -162,7 +167,7 @@ type fakeDriverCollection struct {
 	driver.Collection
 }
 
-func (fakeDriverCollection) Key(doc driver.Document) (interface{}, error) {
+func (fakeDriverCollection) Key(doc driver.Document) (any, error) {
 	key, err := doc.GetField("key")
 	// TODO(#2589): remove this check once we check for empty key.
 	if err != nil || driver.IsEmptyValue(reflect.ValueOf(key)) {

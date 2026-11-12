@@ -29,6 +29,8 @@ type harness struct {
 }
 
 func newHarness(ctx context.Context, t *testing.T, prefix string) (drivertest.Harness, error) {
+	t.Helper()
+
 	return &harness{prefix: prefix}, nil
 }
 
@@ -49,10 +51,16 @@ func (h *harness) MakeDriverForNonexistentBucket(ctx context.Context) (driver.Bu
 	return nil, nil
 }
 
+func (*harness) SupportsCopy() bool               { return true }
+func (*harness) SupportsNonSlashDelimiters() bool { return true }
+func (*harness) SkipDownloadAt() bool             { return false }
+
 func (h *harness) Close() {}
 
 func TestConformance(t *testing.T) {
 	newHarnessNoPrefix := func(ctx context.Context, t *testing.T) (drivertest.Harness, error) {
+		t.Helper()
+
 		return newHarness(ctx, t, "")
 	}
 	drivertest.RunConformanceTests(t, newHarnessNoPrefix, nil)
@@ -61,6 +69,8 @@ func TestConformance(t *testing.T) {
 func TestConformanceWithPrefix(t *testing.T) {
 	const prefix = "some/prefix/dir/"
 	newHarnessWithPrefix := func(ctx context.Context, t *testing.T) (drivertest.Harness, error) {
+		t.Helper()
+
 		return newHarness(ctx, t, prefix)
 	}
 	drivertest.RunConformanceTests(t, newHarnessWithPrefix, nil)
@@ -77,6 +87,8 @@ func TestOpenBucketFromURL(t *testing.T) {
 	}{
 		// OK.
 		{"mem://", false},
+		// NoMD5.
+		{"mem://?nomd5", false},
 		// With prefix.
 		{"mem://?prefix=foo/bar", false},
 		// Invalid parameter.
@@ -87,7 +99,11 @@ func TestOpenBucketFromURL(t *testing.T) {
 	for _, test := range tests {
 		b, err := blob.OpenBucket(ctx, test.URL)
 		if b != nil {
-			defer b.Close()
+			defer func(b *blob.Bucket) {
+				if err := b.Close(); err != nil {
+					t.Errorf("failed to Close: %v", err)
+				}
+			}(b)
 		}
 		if (err != nil) != test.WantErr {
 			t.Errorf("%s: got error %v, want error %v", test.URL, err, test.WantErr)

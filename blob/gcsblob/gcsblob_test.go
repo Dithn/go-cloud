@@ -19,12 +19,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,6 +38,7 @@ import (
 	"gocloud.dev/gcp"
 	"gocloud.dev/internal/testing/setup"
 	"google.golang.org/api/googleapi"
+	"google.golang.org/api/option"
 )
 
 const (
@@ -51,13 +53,24 @@ const (
 	// 4. Download a private key to a .pem file as described here:
 	//    https://godoc.org/cloud.google.com/go/storage#SignedURLOptions
 	//    and pass a path to it via the --privatekey flag.
-	// TODO(issue #300): Use Terraform to provision a bucket, and get the bucket
-	//    name from the Terraform output instead (saving a copy of it for replay).
-	bucketName       = "go-cloud-blob-test-bucket"
+	//    * Download p12 key
+	//    * openssl pkcs12 -in gcs-private-key.p12 -passin pass:notasecret -out gcs-private-key.pem -nodes
+	//    * Edit gcs-private-key.pem and delete the first part of the .pem file, up to and include -----END CERTIFICATE-----
+
+	bucketName = "go-cloud-blob-test-bucket"
+	// This bucket should be zonal.
+	bucketNameZonal  = "go-cloud-blob-test-bucket-zonal"
 	serviceAccountID = "storage-updater@go-cloud-test-216917.iam.gserviceaccount.com"
 )
 
 var pathToPrivateKey = flag.String("privatekey", "", "path to .pem file containing private key (required for --record); defaults to ~/Downloads/gcs-private-key.pem")
+
+func closeWithErrorCheck(t *testing.T, c io.Closer) {
+	t.Helper()
+	if err := c.Close(); err != nil {
+		t.Errorf("failed to close: %v", err)
+	}
+}
 
 type harness struct {
 	client *gcp.HTTPClient
@@ -67,6 +80,8 @@ type harness struct {
 }
 
 func newHarness(ctx context.Context, t *testing.T) (drivertest.Harness, error) {
+	t.Helper()
+
 	opts := &Options{GoogleAccessID: serviceAccountID}
 	if *setup.Record {
 		if *pathToPrivateKey == "" {
@@ -74,7 +89,7 @@ func newHarness(ctx context.Context, t *testing.T) (drivertest.Harness, error) {
 			*pathToPrivateKey = filepath.Join(usr.HomeDir, "Downloads", "gcs-private-key.pem")
 		}
 		// Use a real private key for signing URLs during -record.
-		pk, err := ioutil.ReadFile(*pathToPrivateKey)
+		pk, err := os.ReadFile(*pathToPrivateKey)
 		if err != nil {
 			t.Fatalf("Couldn't find private key at %v: %v", *pathToPrivateKey, err)
 		}
@@ -99,12 +114,138 @@ func (h *harness) MakeDriverForNonexistentBucket(ctx context.Context) (driver.Bu
 	return openBucket(ctx, h.client, "bucket-does-not-exist", h.opts)
 }
 
+func (*harness) SupportsCopy() bool               { return true }
+func (*harness) SupportsNonSlashDelimiters() bool { return true }
+func (*harness) SkipDownloadAt() bool             { return false }
+
 func (h *harness) Close() {
 	h.closer()
 }
 
 func TestConformance(t *testing.T) {
 	drivertest.RunConformanceTests(t, newHarness, []drivertest.AsTest{verifyContentLanguage{}})
+}
+
+func TestOpenBucketGRPC(t *testing.T) {
+	ctx := context.Background()
+	client, cleanup, err := DialGRPC(ctx, nil) // unauthenticated; no RPCs are made here
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	for _, test := range []struct {
+		name       string
+		client     *storage.Client
+		bucketName string
+		opts       *Options
+		wantErr    string
+	}{
+		{name: "ok", client: client, bucketName: "mybucket"},
+		{name: "ok, nil Options", client: client, bucketName: "mybucket", opts: nil},
+		{name: "nil client", bucketName: "mybucket", wantErr: "client is required"},
+		{name: "empty bucket name", client: client, wantErr: "bucketName is required"},
+		{
+			name:       "Options.Client also set",
+			client:     client,
+			bucketName: "mybucket",
+			opts:       &Options{Client: client},
+			wantErr:    "Options.Client must be nil",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			b, err := OpenBucketGRPC(test.client, test.bucketName, test.opts)
+			if test.wantErr != "" {
+				if err == nil {
+					t.Fatalf("got nil error, want one containing %q", test.wantErr)
+				}
+				if !strings.Contains(err.Error(), test.wantErr) {
+					t.Errorf("got error %q, want it to contain %q", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The caller owns the client, so closing the bucket must leave it
+			// usable rather than closing it.
+			if err := b.Close(); err != nil {
+				t.Errorf("Close: %v", err)
+			}
+			if _, err := OpenBucketGRPC(client, "mybucket", nil); err != nil {
+				t.Errorf("client was closed by bucket.Close: %v", err)
+			}
+		})
+	}
+}
+
+// storageGRPCEndpoint is dialed during --record, and replayed from a golden
+// file otherwise.
+const storageGRPCEndpoint = "storage.googleapis.com:443"
+
+// grpcHarness runs the conformance tests over the Cloud Storage gRPC API,
+// recording to and replaying from golden files the same way newHarness does.
+type grpcHarness struct {
+	client  *storage.Client
+	zonal   bool
+	cleanup func()
+}
+
+func newGRPCHarness(zonal bool) func(ctx context.Context, t *testing.T) (drivertest.Harness, error) {
+	return func(ctx context.Context, t *testing.T) (drivertest.Harness, error) {
+		t.Helper()
+		conn, done := setup.NewGCPgRPCConn(ctx, t, storageGRPCEndpoint, "blob")
+		opts := []option.ClientOption{option.WithGRPCConn(conn)}
+		if zonal {
+			opts = append(opts, storage.WithAppendableUploads(), storage.WithGRPCBidiReads())
+		}
+		// The connection carries credentials when recording and is a replayer
+		// otherwise, so this deliberately does not go through DialGRPC.
+		client, err := storage.NewGRPCClient(ctx, opts...)
+		if err != nil {
+			done()
+			return nil, err
+		}
+		return &grpcHarness{
+			client:  client,
+			zonal:   zonal,
+			cleanup: func() { _ = client.Close(); done() },
+		}, nil
+	}
+}
+
+func (h *grpcHarness) MakeDriver(ctx context.Context) (driver.Bucket, error) {
+	name := bucketName
+	if h.zonal {
+		name = bucketNameZonal
+	}
+	return openBucket(ctx, nil, name, &Options{Client: h.client})
+}
+
+func (h *grpcHarness) MakeDriverForNonexistentBucket(ctx context.Context) (driver.Bucket, error) {
+	return openBucket(ctx, nil, "bucket-does-not-exist", &Options{Client: h.client})
+}
+
+// HTTPClient returns nil: without a GoogleAccessID and a signer, SignedURL
+// reports Unimplemented and drivertest skips the checks that would need this.
+// SignedURL is signed client-side and is unaffected by the transport.
+func (*grpcHarness) HTTPClient() *http.Client { return nil }
+
+func (h *grpcHarness) SupportsCopy() bool               { return !h.zonal }
+func (h *grpcHarness) SupportsNonSlashDelimiters() bool { return !h.zonal }
+func (*grpcHarness) SkipDownloadAt() bool               { return false }
+
+func (h *grpcHarness) Close() { h.cleanup() }
+
+// TestConformanceGRPC runs the conformance suite over the Cloud Storage gRPC API.
+func TestConformanceGRPC(t *testing.T) {
+	drivertest.RunConformanceTests(t, newGRPCHarness(false), []drivertest.AsTest{verifyContentLanguage{}})
+}
+
+// TestConformanceGRPCZonal runs the conformance suite over the Cloud Storage
+// gRPC API with the zonal bucket APIs enabled, which is what a Rapid Storage
+func TestConformanceGRPCZonal(t *testing.T) {
+	drivertest.RunConformanceTests(t, newGRPCHarness(true), []drivertest.AsTest{verifyContentLanguage{}})
 }
 
 func BenchmarkGcsblob(b *testing.B) {
@@ -154,7 +295,7 @@ func (verifyContentLanguage) ErrorCheck(b *blob.Bucket, err error) error {
 	return nil
 }
 
-func (verifyContentLanguage) BeforeRead(as func(interface{}) bool) error {
+func (verifyContentLanguage) BeforeRead(as func(any) bool) error {
 	var objp **storage.ObjectHandle
 	if !as(&objp) {
 		return errors.New("BeforeRead.As failed to get ObjectHandle")
@@ -166,7 +307,7 @@ func (verifyContentLanguage) BeforeRead(as func(interface{}) bool) error {
 	return nil
 }
 
-func (verifyContentLanguage) BeforeWrite(as func(interface{}) bool) error {
+func (verifyContentLanguage) BeforeWrite(as func(any) bool) error {
 	var objp **storage.ObjectHandle
 	if !as(&objp) {
 		return errors.New("Writer.As failed to get ObjectHandle")
@@ -179,7 +320,7 @@ func (verifyContentLanguage) BeforeWrite(as func(interface{}) bool) error {
 	return nil
 }
 
-func (verifyContentLanguage) BeforeCopy(as func(interface{}) bool) error {
+func (verifyContentLanguage) BeforeCopy(as func(any) bool) error {
 	var coh *CopyObjectHandles
 	if !as(&coh) {
 		return errors.New("BeforeCopy.As failed to get CopyObjectHandles")
@@ -191,7 +332,15 @@ func (verifyContentLanguage) BeforeCopy(as func(interface{}) bool) error {
 	return nil
 }
 
-func (verifyContentLanguage) BeforeList(as func(interface{}) bool) error {
+func (verifyContentLanguage) BeforeDelete(as func(any) bool) error {
+	var objp **storage.ObjectHandle
+	if !as(&objp) {
+		return errors.New("BeforeDelete.As failed to get ObjectHandle")
+	}
+	return nil
+}
+
+func (verifyContentLanguage) BeforeList(as func(any) bool) error {
 	var q *storage.Query
 	if !as(&q) {
 		return errors.New("List.As failed")
@@ -200,7 +349,7 @@ func (verifyContentLanguage) BeforeList(as func(interface{}) bool) error {
 	return nil
 }
 
-func (verifyContentLanguage) BeforeSign(as func(interface{}) bool) error {
+func (verifyContentLanguage) BeforeSign(as func(any) bool) error {
 	var opts *storage.SignedURLOptions
 	if !as(&opts) {
 		return errors.New("BeforeSign.As failed")
@@ -317,7 +466,7 @@ func TestOpenBucket(t *testing.T) {
 			// Create portable type.
 			b, err := OpenBucket(ctx, client, test.bucketName, nil)
 			if b != nil {
-				defer b.Close()
+				defer closeWithErrorCheck(t, b)
 			}
 			if (err != nil) != test.wantErr {
 				t.Errorf("got err %v want error %v", err, test.wantErr)
@@ -340,11 +489,11 @@ func TestBeforeReadNonExistentKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	bucket := blob.NewBucket(drv)
-	defer bucket.Close()
+	defer closeWithErrorCheck(t, bucket)
 
 	// Try reading a nonexistent key.
 	_, err = bucket.NewReader(ctx, "nonexistent-key", &blob.ReaderOptions{
-		BeforeRead: func(asFunc func(interface{}) bool) error {
+		BeforeRead: func(asFunc func(any) bool) error {
 			var objp **storage.ObjectHandle
 			if !asFunc(&objp) {
 				return errors.New("Reader.As failed to get ObjectHandle")
@@ -381,11 +530,11 @@ func TestPreconditions(t *testing.T) {
 		t.Fatal(err)
 	}
 	bucket := blob.NewBucket(drv)
-	defer bucket.Close()
+	defer closeWithErrorCheck(t, bucket)
 
 	// Try writing with a failing precondition.
 	if err := bucket.WriteAll(ctx, key, []byte(content), &blob.WriterOptions{
-		BeforeWrite: func(asFunc func(interface{}) bool) error {
+		BeforeWrite: func(asFunc func(any) bool) error {
 			var objp **storage.ObjectHandle
 			if !asFunc(&objp) {
 				return errors.New("Writer.As failed to get ObjectHandle")
@@ -400,7 +549,7 @@ func TestPreconditions(t *testing.T) {
 
 	// Repeat with a precondition that will pass.
 	if err := bucket.WriteAll(ctx, key, []byte(content), &blob.WriterOptions{
-		BeforeWrite: func(asFunc func(interface{}) bool) error {
+		BeforeWrite: func(asFunc func(any) bool) error {
 			var objp **storage.ObjectHandle
 			if !asFunc(&objp) {
 				return errors.New("Writer.As failed to get ObjectHandle")
@@ -412,11 +561,15 @@ func TestPreconditions(t *testing.T) {
 	}); err != nil {
 		t.Errorf("got error %v, wanted nil", err)
 	}
-	defer bucket.Delete(ctx, key)
+	defer func() {
+		if err := bucket.Delete(ctx, key); err != nil {
+			t.Errorf("failed to Delete: %v", err)
+		}
+	}()
 
 	// Try reading with a failing precondition.
 	_, err = bucket.NewReader(ctx, key, &blob.ReaderOptions{
-		BeforeRead: func(asFunc func(interface{}) bool) error {
+		BeforeRead: func(asFunc func(any) bool) error {
 			var objp **storage.ObjectHandle
 			if !asFunc(&objp) {
 				return errors.New("Reader.As failed to get ObjectHandle")
@@ -442,7 +595,7 @@ func TestPreconditions(t *testing.T) {
 
 	// Repeat with a precondition that will pass.
 	reader, err := bucket.NewReader(ctx, key, &blob.ReaderOptions{
-		BeforeRead: func(asFunc func(interface{}) bool) error {
+		BeforeRead: func(asFunc func(any) bool) error {
 			var objp **storage.ObjectHandle
 			if !asFunc(&objp) {
 				return errors.New("Reader.As failed to get ObjectHandle")
@@ -455,8 +608,8 @@ func TestPreconditions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reader.Close()
-	gotBytes, err := ioutil.ReadAll(reader)
+	defer closeWithErrorCheck(t, reader)
+	gotBytes, err := io.ReadAll(reader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -466,7 +619,7 @@ func TestPreconditions(t *testing.T) {
 
 	// Try copying with a failing precondition on Dst.
 	err = bucket.Copy(ctx, key2, key, &blob.CopyOptions{
-		BeforeCopy: func(asFunc func(interface{}) bool) error {
+		BeforeCopy: func(asFunc func(any) bool) error {
 			var coh *CopyObjectHandles
 			if !asFunc(&coh) {
 				return errors.New("Copy.As failed to get CopyObjectHandles")
@@ -482,7 +635,7 @@ func TestPreconditions(t *testing.T) {
 
 	// Try copying with a failing precondition on Src.
 	err = bucket.Copy(ctx, key2, key, &blob.CopyOptions{
-		BeforeCopy: func(asFunc func(interface{}) bool) error {
+		BeforeCopy: func(asFunc func(any) bool) error {
 			var coh *CopyObjectHandles
 			if !asFunc(&coh) {
 				return errors.New("Copy.As failed to get CopyObjectHandles")
@@ -498,7 +651,7 @@ func TestPreconditions(t *testing.T) {
 
 	// Repeat with preconditions on Dst and Src that will succeed.
 	err = bucket.Copy(ctx, key2, key, &blob.CopyOptions{
-		BeforeCopy: func(asFunc func(interface{}) bool) error {
+		BeforeCopy: func(asFunc func(any) bool) error {
 			var coh *CopyObjectHandles
 			if !asFunc(&coh) {
 				return errors.New("Reader.As failed to get CopyObjectHandles")
@@ -511,7 +664,11 @@ func TestPreconditions(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	defer bucket.Delete(ctx, key2)
+	defer func() {
+		if err := bucket.Delete(ctx, key2); err != nil {
+			t.Errorf("failed to Delete: %v", err)
+		}
+	}()
 }
 
 func TestURLOpenerForParams(t *testing.T) {
@@ -519,11 +676,11 @@ func TestURLOpenerForParams(t *testing.T) {
 
 	// Create a file for use as a dummy private key file.
 	privateKey := []byte("some content")
-	pkFile, err := ioutil.TempFile("", "my-private-key")
+	pkFile, err := os.CreateTemp("", "my-private-key")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(pkFile.Name())
+	defer func() { _ = os.Remove(pkFile.Name()) }()
 	if _, err := pkFile.Write(privateKey); err != nil {
 		t.Fatal(err)
 	}
@@ -532,11 +689,13 @@ func TestURLOpenerForParams(t *testing.T) {
 	}
 
 	tests := []struct {
-		name     string
-		currOpts Options
-		query    url.Values
-		wantOpts Options
-		wantErr  bool
+		name       string
+		currOpts   Options
+		query      url.Values
+		wantOpts   Options
+		wantParams urlParams
+		wantClient bool
+		wantErr    bool
 	}{
 		{
 			name: "InvalidParam",
@@ -561,9 +720,36 @@ func TestURLOpenerForParams(t *testing.T) {
 			wantOpts: Options{GoogleAccessID: "bar"},
 		},
 		{
+			name:     "AccessID override to - makes new client",
+			currOpts: Options{GoogleAccessID: "foo"},
+			query: url.Values{
+				"access_id": {"-"},
+			},
+			wantOpts:   Options{}, // cleared
+			wantParams: urlParams{anonymous: true},
+			wantClient: true,
+		},
+		{
 			name:     "AccessID not overridden",
 			currOpts: Options{GoogleAccessID: "bar"},
 			wantOpts: Options{GoogleAccessID: "bar"},
+		},
+		{
+			name: "Invalid value for anonymous",
+			query: url.Values{
+				"anonymous": {"bad"},
+			},
+			wantErr: true,
+		},
+		{
+			name:     "Anonymous",
+			currOpts: Options{GoogleAccessID: "foo"},
+			query: url.Values{
+				"anonymous": {"true"},
+			},
+			wantOpts:   Options{}, // cleared
+			wantParams: urlParams{anonymous: true},
+			wantClient: true,
 		},
 		{
 			name: "BadPrivateKeyPath",
@@ -588,6 +774,61 @@ func TestURLOpenerForParams(t *testing.T) {
 			wantOpts: Options{},
 		},
 		{
+			name: "GRPC",
+			query: url.Values{
+				"grpc": {"true"},
+			},
+			wantOpts:   Options{},
+			wantParams: urlParams{useGRPC: true},
+		},
+		{
+			name: "Invalid value for grpc",
+			query: url.Values{
+				"grpc": {"bad"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "Zonal",
+			query: url.Values{
+				"zonal": {"true"},
+			},
+			wantOpts: Options{},
+			// zonal=true implies grpc=true.
+			wantParams: urlParams{useGRPC: true, useZonal: true},
+		},
+		{
+			name: "Zonal with explicit grpc",
+			query: url.Values{
+				"grpc":  {"true"},
+				"zonal": {"true"},
+			},
+			wantOpts:   Options{},
+			wantParams: urlParams{useGRPC: true, useZonal: true},
+		},
+		{
+			name: "Zonal false",
+			query: url.Values{
+				"zonal": {"false"},
+			},
+			wantOpts: Options{},
+		},
+		{
+			name: "Zonal conflicts with grpc=false",
+			query: url.Values{
+				"grpc":  {"false"},
+				"zonal": {"true"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "Invalid value for zonal",
+			query: url.Values{
+				"zonal": {"bad"},
+			},
+			wantErr: true,
+		},
+		{
 			name: "AccessID change clears PrivateKey and MakeSignBytes",
 			currOpts: Options{
 				GoogleAccessID: "foo",
@@ -608,7 +849,7 @@ func TestURLOpenerForParams(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			o := &URLOpener{Options: test.currOpts}
-			got, err := o.forParams(ctx, test.query)
+			got, gotClient, gotParams, err := o.forParams(ctx, test.query)
 			if (err != nil) != test.wantErr {
 				t.Errorf("got err %v want error %v", err, test.wantErr)
 			}
@@ -618,6 +859,12 @@ func TestURLOpenerForParams(t *testing.T) {
 			if diff := cmp.Diff(got, &test.wantOpts); diff != "" {
 				t.Errorf("opener.forParams(...) diff (-want +got):\n%s", diff)
 			}
+			if diff := cmp.Diff(gotParams, test.wantParams, cmp.AllowUnexported(urlParams{})); diff != "" {
+				t.Errorf("opener.forParams(...) params diff (-want +got):\n%s", diff)
+			}
+			if test.wantClient != (gotClient != nil) {
+				t.Errorf("opener.forParams client return value was unexpected, got %v want %v", gotClient != nil, test.wantClient)
+			}
 		})
 	}
 }
@@ -626,12 +873,12 @@ func TestOpenBucketFromURL(t *testing.T) {
 	cleanup := setup.FakeGCPDefaultCredentials(t)
 	defer cleanup()
 
-	pkFile, err := ioutil.TempFile("", "my-private-key")
+	pkFile, err := os.CreateTemp("", "my-private-key")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(pkFile.Name())
-	if err := ioutil.WriteFile(pkFile.Name(), []byte("key"), 0666); err != nil {
+	defer func() { _ = os.Remove(pkFile.Name()) }()
+	if err := os.WriteFile(pkFile.Name(), []byte("key"), 0o666); err != nil {
 		t.Fatal(err)
 	}
 
@@ -647,6 +894,23 @@ func TestOpenBucketFromURL(t *testing.T) {
 		{"gs://mybucket?private_key_path=" + pkFile.Name(), false},
 		// OK, clearing any pre-existing private key.
 		{"gs://mybucket?private_key_path=", false},
+		// OK, setting universe_domain.
+		{"gs://mybucket?universe_domain=example.com", false},
+		// OK, universe_domain with empty value.
+		{"gs://mybucket?universe_domain=", false},
+		// OK, using the gRPC API.
+		{"gs://mybucket?grpc=true", false},
+		// Invalid value for grpc.
+		{"gs://mybucket?grpc=bad", true},
+		// OK, using the zonal APIs (required for Rapid Storage buckets).
+		{"gs://mybucket?zonal=true", false},
+		// Invalid value for zonal.
+		{"gs://mybucket?zonal=bad", true},
+		// zonal=true cannot be combined with grpc=false.
+		{"gs://mybucket?zonal=true&grpc=false", true},
+		// OK, gRPC without credentials.
+		{"gs://mybucket?grpc=true&anonymous=true", false},
+		{"gs://mybucket?zonal=true&anonymous=true", false},
 		// Invalid private_key_path.
 		{"gs://mybucket?private_key_path=invalid-path", true},
 		// Invalid parameter.
@@ -657,7 +921,7 @@ func TestOpenBucketFromURL(t *testing.T) {
 	for _, test := range tests {
 		b, err := blob.OpenBucket(ctx, test.URL)
 		if b != nil {
-			defer b.Close()
+			defer closeWithErrorCheck(t, b)
 		}
 		if (err != nil) != test.WantErr {
 			t.Errorf("%s: got error %v, want error %v", test.URL, err, test.WantErr)
@@ -672,7 +936,8 @@ func TestReadDefaultCredentials(t *testing.T) {
 		WantPrivateKey []byte
 	}{
 		// Variant A: service account file
-		{`{
+		{
+			`{
 			"type": "service_account",
 			"project_id": "project-id",
 			"private_key_id": "key-id",
@@ -688,7 +953,8 @@ func TestReadDefaultCredentials(t *testing.T) {
 			[]byte("-----BEGIN PRIVATE KEY-----\nprivate-key\n-----END PRIVATE KEY-----\n"),
 		},
 		// Variant A: credentials file absent a private key (stripped)
-		{`{
+		{
+			`{
 			"google": {},
 			"client_email": "service-account-email",
 			"client_id": "client-id"
@@ -697,7 +963,8 @@ func TestReadDefaultCredentials(t *testing.T) {
 			[]byte(""),
 		},
 		// Variant B: obtained through the REST API
-		{`{
+		{
+			`{
 			"name": "projects/project-id/serviceAccounts/service-account-email/keys/key-id",
 			"privateKeyType": "TYPE_GOOGLE_CREDENTIALS_FILE",
 			"privateKeyData": "private-key",

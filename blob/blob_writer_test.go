@@ -20,12 +20,20 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	"sync"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"gocloud.dev/blob"
 	"gocloud.dev/blob/memblob"
 )
+
+func closeWithErrorCheck(t *testing.T, c io.Closer) {
+	t.Helper()
+	if err := c.Close(); err != nil {
+		t.Errorf("failed to close: %v", err)
+	}
+}
 
 // TestWriteReturnValues verifies that blob.Writer returns the correct n
 // even when it is doing content sniffing.
@@ -35,7 +43,7 @@ func TestWriteReturnValues(t *testing.T) {
 	for _, withContentType := range []bool{true, false} {
 		t.Run(fmt.Sprintf("withContentType %v", withContentType), func(t *testing.T) {
 			bucket := memblob.OpenBucket(nil)
-			defer bucket.Close()
+			defer closeWithErrorCheck(t, bucket)
 
 			var opts *blob.WriterOptions
 			if withContentType {
@@ -45,11 +53,7 @@ func TestWriteReturnValues(t *testing.T) {
 			if err != nil {
 				t.Fatalf("couldn't create writer with options: %v", err)
 			}
-			defer func() {
-				if err := w.Close(); err != nil {
-					t.Errorf("failed to close writer: %v", err)
-				}
-			}()
+			defer closeWithErrorCheck(t, w)
 			n, err := io.CopyN(w, rand.Reader, 182)
 			if err != nil || n != 182 {
 				t.Fatalf("CopyN(182) got %d, want 182: %v", n, err)
@@ -66,10 +70,16 @@ func randomData(nBytes int64) ([]byte, error) {
 	var buf bytes.Buffer
 	n, err := io.CopyN(&buf, rand.Reader, nBytes)
 	if err != nil || n != nBytes {
-		return nil, fmt.Errorf("failed to get random data (%d want %d): %v", n, nBytes, err)
+		return nil, fmt.Errorf("failed to get random data (%d want %d): %w", n, nBytes, err)
 	}
 	return buf.Bytes(), nil
 }
+
+// Ensure that blob.Reader implements io.WriterTo.
+var _ io.WriterTo = &blob.Reader{}
+
+// Ensure that blob.Writer implements io.ReaderFrom.
+var _ io.ReaderFrom = &blob.Writer{}
 
 func TestReadFrom(t *testing.T) {
 	const dstKey = "dstkey"
@@ -77,9 +87,12 @@ func TestReadFrom(t *testing.T) {
 	// Get some random data, of a large enough size to require multiple
 	// reads/writes given our buffer size of 1024.
 	data, err := randomData(1024*10 + 10)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	bucket := memblob.OpenBucket(nil)
-	defer bucket.Close()
+	defer closeWithErrorCheck(t, bucket)
 
 	// Create a blob.Writer and write to it using ReadFrom given a buffer
 	// holding the random data.
@@ -106,21 +119,18 @@ func TestReadFrom(t *testing.T) {
 	}
 }
 
-// Ensure that blob.Reader implements io.WriterTo.
-var _ io.WriterTo = &blob.Reader{}
-
-// Ensure that blob.Writer implements io.ReaderFrom.
-var _ io.ReaderFrom = &blob.Writer{}
-
 func TestWriteTo(t *testing.T) {
 	const srcKey = "srckey"
 
 	// Get some random data, of a large enough size to require multiple
 	// reads/writes given our buffer size of 1024.
 	data, err := randomData(1024*10 + 10)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	bucket := memblob.OpenBucket(nil)
-	defer bucket.Close()
+	defer closeWithErrorCheck(t, bucket)
 
 	// Write the data to a key.
 	ctx := context.Background()
@@ -147,4 +157,103 @@ func TestWriteTo(t *testing.T) {
 	if !cmp.Equal(got, data) {
 		t.Errorf("got %v, want %v", got, data)
 	}
+}
+
+// TestCopyBytes uses io.Copy to copy bytes from one key to another.
+func TestCopyBytes(t *testing.T) {
+	const srcKey = "testkey-src"
+	const dstKey = "testkey-dst"
+
+	ctx := context.Background()
+
+	// Get some random data, of a large enough size to require multiple
+	// reads/writes given our buffer size of 1024.
+	data, err := randomData(1024*10 + 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bucket := memblob.OpenBucket(nil)
+	defer closeWithErrorCheck(t, bucket)
+
+	// Write the data to srcKey.
+	if err := bucket.WriteAll(ctx, srcKey, data, nil); err != nil {
+		t.Errorf("failed to WriteAll: %v", err)
+	}
+
+	// Create a reader for srcKey.
+	r, err := bucket.NewReader(ctx, srcKey, nil)
+	if err != nil {
+		t.Fatalf("failed to create reader: %v", err)
+	}
+
+	// Create a writer for dstKey.
+	w, err := bucket.NewWriter(ctx, dstKey, nil)
+	if err != nil {
+		t.Fatalf("failed to create writer: %v", err)
+	}
+
+	// Copy the data.
+	if _, err := io.Copy(w, r); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify the data was copied correctly.
+	got, err := bucket.ReadAll(ctx, dstKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cmp.Equal(got, data) {
+		t.Errorf("got %v, want %v", got, data)
+	}
+}
+
+// TestSetDefaultWriterOptionsConcurrent verifies that SetDefaultWriterOptions
+// can be called concurrently with WriteAll and NewWriter. Run with -race.
+func TestSetDefaultWriterOptionsConcurrent(t *testing.T) {
+	ctx := context.Background()
+	bucket := memblob.OpenBucket(nil)
+	defer closeWithErrorCheck(t, bucket)
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			if err := bucket.SetDefaultWriterOptions(blob.WriterOptions{BufferSize: i}); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			if err := bucket.WriteAll(ctx, "a", []byte("hello"), nil); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			w, err := bucket.NewWriter(ctx, "b", nil)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if err := w.Close(); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
 }

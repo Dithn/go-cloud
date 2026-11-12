@@ -6,7 +6,7 @@ weight: 2
 toc: true
 ---
 
-Subscribing to receive message from a topic with the Go CDK takes three steps:
+Subscribing to receive messages from a topic with the Go CDK takes three steps:
 
 1. [Open a subscription][] to a topic with the Pub/Sub service of your choice (once per
    subscription).
@@ -51,7 +51,7 @@ for URL usage for each supported service.
 
 Alternatively, if you need fine-grained
 control over the connection settings, you can call the constructor function in
-the driver package directly (like `gcppubsub.OpenSubscription`).
+the driver package directly (like `gcppubsubv2.OpenSubscription`).
 
 ```go
 import "gocloud.dev/pubsub/<driver>"
@@ -113,18 +113,18 @@ alternatives, including using environment variables.
 [GCP creds]: https://cloud.google.com/docs/authentication/production
 [`gcloud auth application-default login`]: https://cloud.google.com/sdk/gcloud/reference/auth/application-default/login
 
-{{< goexample "gocloud.dev/pubsub/gcppubsub.Example_openSubscriptionFromURL" >}}
+{{< goexample "gocloud.dev/pubsub/gcppubsubv2.Example_openSubscriptionFromURL" >}}
 
 #### Google Cloud Pub/Sub Constructor {#gcp-ctor}
 
-The [`gcppubsub.OpenSubscription`][] constructor opens a Cloud Pub/Sub
+The [`gcppubsubv2.OpenSubscription`][] constructor opens a Cloud Pub/Sub
 subscription. You must first obtain [GCP credentials][GCP creds] and then
 create a gRPC connection to Cloud Pub/Sub. (This gRPC connection can be
 reused among subscriptions.)
 
-{{< goexample "gocloud.dev/pubsub/gcppubsub.ExampleOpenSubscription" >}}
+{{< goexample "gocloud.dev/pubsub/gcppubsubv2.ExampleOpenSubscription" >}}
 
-[`gcppubsub.OpenSubscription`]: https://godoc.org/gocloud.dev/pubsub/gcppubsub#OpenSubscription
+[`gcppubsubv2.OpenSubscription`]: https://godoc.org/gocloud.dev/pubsub/gcppubsubv2#OpenSubscription
 
 ### Amazon Simple Queueing Service {#sqs}
 
@@ -135,12 +135,7 @@ query parameter to ensure your application connects to the correct region.
 
 [SQS]: https://aws.amazon.com/sqs/
 
-`pubsub.OpenSubscription` will create a default AWS Session with the
-`SharedConfigEnable` option enabled; if you have authenticated with the AWS CLI,
-it will use those credentials. See [AWS Session][] to learn about authentication
-alternatives, including using environment variables.
-
-[AWS Session]: https://docs.aws.amazon.com/sdk-for-go/api/aws/session/
+`pubsub.OpenSubscription` will open a subscription using a default AWS Config.
 
 {{< goexample "gocloud.dev/pubsub/awssnssqs.Example_openSubscriptionFromURL" >}}
 
@@ -152,7 +147,7 @@ whether the message bodies are raw or [SNS JSON][].
 
 Messages with a `base64encoded` message attribute will be automatically
 [Base64][] decoded before being returned. See the [SNS publishing guide][]
-or the [SQS publshing guide][] for more details.
+or the [SQS publishing guide][] for more details.
 
 [Base64]: https://en.wikipedia.org/wiki/Base64
 [SNS publishing guide]: {{< ref "./publish.md#sns" >}}
@@ -162,17 +157,16 @@ or the [SQS publshing guide][] for more details.
 #### Amazon SQS Constructor {#sqs-ctor}
 
 The [`awssnssqs.OpenSubscription`][] constructor opens an SQS queue. You must
-first create an [AWS session][] with the same region as your topic:
+first create an AWS Config with the same region as your topic:
 
 {{< goexample "gocloud.dev/pubsub/awssnssqs.ExampleOpenSubscription" >}}
 
 [`awssnssqs.OpenSubscription`]: https://godoc.org/gocloud.dev/pubsub/awssnssqs#OpenSubscription
-[AWS session]: https://docs.aws.amazon.com/sdk-for-go/api/aws/session/
 
 ### Azure Service Bus {#azure}
 
-The Go CDK can recieve messages from an [Azure Service Bus][] subscription
-over [AMQP 1.0][]. The URL for subscribing is the topic name with the
+The Go CDK can receive messages from an [Azure Service Bus][] subscription.
+The URL for subscribing is the topic name with the
 subscription name in the `subscription` query parameter.
 `pubsub.OpenSubscription` will use the environment variable
 `SERVICEBUS_CONNECTION_STRING` to obtain the Service Bus Connection String
@@ -195,7 +189,7 @@ package to make this easier.
 {{< goexample "gocloud.dev/pubsub/azuresb.ExampleOpenSubscription" >}}
 
 [`azuresb.OpenSubscription`]: https://godoc.org/gocloud.dev/pubsub/azuresb#OpenSubscription
-[Azure Service Bus library]: https://github.com/Azure/azure-service-bus-go
+[Azure Service Bus library]: https://pkg.go.dev/github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus
 
 ### RabbitMQ {#rabbitmq}
 
@@ -216,7 +210,7 @@ You must first create an [`*amqp.Connection`][] to your RabbitMQ instance.
 
 {{< goexample "gocloud.dev/pubsub/rabbitpubsub.ExampleOpenSubscription" >}}
 
-[`*amqp.Connection`]: https://godoc.org/github.com/streadway/amqp#Connection
+[`*amqp.Connection`]: https://pkg.go.dev/github.com/rabbitmq/amqp091-go#Connection
 [`rabbitpubsub.OpenSubscription`]: https://godoc.org/gocloud.dev/pubsub/rabbitpubsub#OpenSubscription
 
 ### NATS {#nats}
@@ -274,7 +268,7 @@ get you started.
 
 {{< goexample "gocloud.dev/pubsub/kafkapubsub.ExampleOpenSubscription" >}}
 
-[`*sarama.Config`]: https://godoc.org/github.com/Shopify/sarama#Config
+[`*sarama.Config`]: https://godoc.org/github.com/IBM/sarama#Config
 [`kafkapubsub.OpenSubscription`]: https://godoc.org/gocloud.dev/pubsub/kafkapubsub#OpenSubscription
 [`kafkapubsub.MinimalConfig`]: https://godoc.org/gocloud.dev/pubsub/kafkapubsub#MinimalConfig
 

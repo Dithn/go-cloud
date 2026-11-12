@@ -46,9 +46,9 @@ type state struct {
 	err        error
 }
 
-func (s *state) Value() (interface{}, error) { return s.val, s.err }
-func (s *state) UpdateTime() time.Time       { return s.updateTime }
-func (s *state) As(i interface{}) bool       { return false }
+func (s *state) Value() (any, error)   { return s.val, s.err }
+func (s *state) UpdateTime() time.Time { return s.updateTime }
+func (s *state) As(i any) bool         { return false }
 
 // fakeWatcher is a fake implementation of driver.Watcher that returns a set *state.
 type fakeWatcher struct {
@@ -218,7 +218,7 @@ func TestVariable_Latest(t *testing.T) {
 	// Call Latest concurrently. There's still no value.
 	var wg sync.WaitGroup
 	wg.Add(numGoroutines)
-	for i := 0; i < numGoroutines; i++ {
+	for range numGoroutines {
 		go func() {
 			ctx2, cancel := context.WithTimeout(ctx, blockingCheckDelay)
 			cancel()
@@ -248,7 +248,7 @@ func TestVariable_Latest(t *testing.T) {
 	// Call Latest concurrently, only exiting each goroutine when they
 	// see the content1 value.
 	wg.Add(numGoroutines)
-	for i := 0; i < numGoroutines; i++ {
+	for range numGoroutines {
 		go func() {
 			for {
 				val, err := v.Latest(ctx)
@@ -280,7 +280,7 @@ func TestVariable_Latest(t *testing.T) {
 	// Call Latest concurrently, only exiting each goroutine when they
 	// see the content2 value.
 	wg.Add(numGoroutines)
-	for i := 0; i < numGoroutines; i++ {
+	for range numGoroutines {
 		go func() {
 			for {
 				val, err := v.Latest(ctx)
@@ -308,19 +308,17 @@ func TestVariable_Latest(t *testing.T) {
 	// Call Latest concurrently. The test will be flaky if some of them
 	// start getting errors.
 	wg.Add(numGoroutines)
-	for i := 0; i < numGoroutines; i++ {
+	for range numGoroutines {
 		go func() {
-			for {
-				val, err := v.Latest(ctx)
-				if err != nil {
-					// Errors are unexpected at this point.
-					t.Error(err)
-				} else if val.Value != content2 {
-					t.Errorf("got %v want %s", val.Value, content2)
-				}
-				wg.Done()
-				return
+			val, err := v.Latest(ctx)
+			if err != nil {
+				// Errors are unexpected at this point.
+				t.Error(err)
+			} else if val.Value != content2 {
+				t.Errorf("got %v want %s", val.Value, content2)
 			}
+			wg.Done()
+			return
 		}()
 	}
 	wg.Wait()
@@ -402,7 +400,7 @@ func TestErrorsAreWrapped(t *testing.T) {
 	verifyWrap := func(description string, err error) {
 		if unwrapped, ok := err.(*gcerr.Error); !ok {
 			t.Errorf("%s: not wrapped: %v", description, err)
-		} else if du, ok := unwrapped.Unwrap().(*gcerr.Error); ok {
+		} else if du, ok := unwrapped.Unwrap()[0].(*gcerr.Error); ok {
 			t.Errorf("%s: double wrapped: %v", description, du)
 		}
 	}
@@ -413,11 +411,6 @@ func TestErrorsAreWrapped(t *testing.T) {
 	err = v.Close()
 	verifyWrap("Close", err)
 }
-
-var (
-	testOpenOnce sync.Once
-	testOpenGot  *url.URL
-)
 
 func TestURLMux(t *testing.T) {
 	ctx := context.Background()
@@ -537,7 +530,7 @@ func (o *fakeOpener) OpenVariableURL(ctx context.Context, u *url.URL) (*Variable
 func TestDecoder(t *testing.T) {
 	type Struct struct {
 		FieldA string
-		FieldB map[string]interface{}
+		FieldB map[string]any
 	}
 
 	num := 4321
@@ -545,7 +538,7 @@ func TestDecoder(t *testing.T) {
 	str := "boring string"
 	strptr := &str
 
-	inputs := []interface{}{
+	inputs := []any{
 		str,
 		strptr,
 		num,
@@ -553,7 +546,7 @@ func TestDecoder(t *testing.T) {
 		100.1,
 		Struct{
 			FieldA: "hello",
-			FieldB: map[string]interface{}{
+			FieldB: map[string]any{
 				"hello": "world",
 			},
 		},
@@ -563,7 +556,7 @@ func TestDecoder(t *testing.T) {
 		map[string]string{
 			"slice": "pizza",
 		},
-		&map[string]interface{}{},
+		&map[string]any{},
 		[]string{"hello", "world"},
 		&[]int{1, 0, 1},
 		[...]float64{3.1415},
@@ -572,7 +565,7 @@ func TestDecoder(t *testing.T) {
 
 	for _, tc := range []struct {
 		desc     string
-		encodeFn func(interface{}) ([]byte, error)
+		encodeFn func(any) ([]byte, error)
 		decodeFn Decode
 	}{
 		{
@@ -608,7 +601,7 @@ func TestDecoder(t *testing.T) {
 	}
 }
 
-func gobMarshal(v interface{}) ([]byte, error) {
+func gobMarshal(v any) ([]byte, error) {
 	var buf bytes.Buffer
 	if err := gob.NewEncoder(&buf).Encode(v); err != nil {
 		return nil, err
@@ -636,6 +629,21 @@ func TestBytesDecoder(t *testing.T) {
 	if diff := cmp.Diff(got, input); diff != "" {
 		t.Errorf("output got %v, want %q", got, input)
 	}
+	// Mutating the decoded output must not mutate the input.
+	got.([]byte)[0] = 'J'
+	if input[0] != 'h' {
+		t.Errorf("BytesDecode aliases input: input=%q after mutating output", input)
+	}
+	// Mutating the input after decoding must not mutate the decoded output.
+	input2 := []byte("hello world")
+	got2, err := BytesDecoder.Decode(context.Background(), input2)
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	input2[0] = 'J'
+	if got2.([]byte)[0] != 'h' {
+		t.Errorf("BytesDecode aliases input: output=%q after mutating input", got2)
+	}
 }
 
 func TestDecryptDecoder(t *testing.T) {
@@ -648,19 +656,19 @@ func TestDecryptDecoder(t *testing.T) {
 
 	tests := []struct {
 		desc      string
-		in        interface{}
-		encodeFn  func(interface{}) ([]byte, error)
+		in        any
+		encodeFn  func(any) ([]byte, error)
 		postDecFn Decode
 	}{
 		{
 			desc:     "Bytes",
 			in:       []byte("hello world"),
-			encodeFn: func(obj interface{}) ([]byte, error) { return obj.([]byte), nil },
+			encodeFn: func(obj any) ([]byte, error) { return obj.([]byte), nil },
 		},
 		{
 			desc:      "String",
 			in:        "hello world",
-			encodeFn:  func(obj interface{}) ([]byte, error) { return []byte(obj.(string)), nil },
+			encodeFn:  func(obj any) ([]byte, error) { return []byte(obj.(string)), nil },
 			postDecFn: StringDecode,
 		},
 		{

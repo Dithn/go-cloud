@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//	https://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,13 +21,17 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/xerrors"
-
 	"gocloud.dev/gcerrors"
-	"gocloud.dev/internal/gcerr"
 	"gocloud.dev/pubsub"
 	"gocloud.dev/pubsub/driver"
 )
+
+func shutdownSubscription(ctx context.Context, t testing.TB, sub *pubsub.Subscription) {
+	t.Helper()
+	if err := sub.Shutdown(ctx); err != nil {
+		t.Errorf("failed to Shutdown subscription: %v", err)
+	}
+}
 
 type ackingDriverSub struct {
 	driver.Subscription
@@ -73,7 +77,7 @@ func TestAckTriggersDriverSendAcksForOneMessage(t *testing.T) {
 		},
 	}
 	sub := pubsub.NewSubscription(ds, nil, nil)
-	defer sub.Shutdown(ctx)
+	defer shutdownSubscription(ctx, t, sub)
 	m2, err := sub.Receive(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -107,10 +111,10 @@ func TestMultipleAcksCanGoIntoASingleBatch(t *testing.T) {
 		},
 	}
 	sub := pubsub.NewSubscription(ds, nil, nil)
-	defer sub.Shutdown(ctx)
+	defer shutdownSubscription(ctx, t, sub)
 
 	// Receive and ack the messages concurrently.
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		wg.Add(1)
 		go func() {
 			mr, err := sub.Receive(ctx)
@@ -143,7 +147,7 @@ func TestTooManyAcksForASingleBatchGoIntoMultipleBatches(t *testing.T) {
 	// of this.
 	n := 1000
 	var ms []*driver.Message
-	for i := 0; i < n; i++ {
+	for i := range n {
 		ms = append(ms, &driver.Message{AckID: i})
 	}
 	ds := &ackingDriverSub{
@@ -152,31 +156,38 @@ func TestTooManyAcksForASingleBatchGoIntoMultipleBatches(t *testing.T) {
 			mu.Lock()
 			defer mu.Unlock()
 			sentAckBatches = append(sentAckBatches, ackIDs)
-			for i := 0; i < len(ackIDs); i++ {
+			for range ackIDs {
 				wg.Done()
 			}
 			return nil
 		},
 	}
 	sub := pubsub.NewSubscription(ds, nil, nil)
-	defer sub.Shutdown(ctx)
+	defer shutdownSubscription(ctx, t, sub)
 
+	errs := make(chan error, n)
 	// Receive and ack the messages concurrently.
 	recv := func() {
 		mr, err := sub.Receive(ctx)
 		if err != nil {
-			t.Fatal(err)
+			errs <- err
 		}
 		mr.Ack()
 	}
 	wg.Add(n)
-	for i := 0; i < n; i++ {
+	for range n {
 		go recv()
 	}
 	wg.Wait()
 
+	close(errs)
+
 	if len(sentAckBatches) < 2 {
 		t.Errorf("got %d batches, want at least 2", len(sentAckBatches))
+	}
+
+	for err := range errs {
+		t.Fatalf("got error from goroutine: %v", err)
 	}
 }
 
@@ -191,7 +202,7 @@ func TestAckDoesNotBlock(t *testing.T) {
 		},
 	}
 	sub := pubsub.NewSubscription(ds, nil, nil)
-	defer sub.Shutdown(ctx)
+	defer shutdownSubscription(context.Background(), t, sub)
 	defer cancel()
 	mr, err := sub.Receive(ctx)
 	if err != nil {
@@ -214,7 +225,7 @@ func TestDoubleAckCausesPanic(t *testing.T) {
 		},
 	}
 	sub := pubsub.NewSubscription(ds, nil, nil)
-	defer sub.Shutdown(ctx)
+	defer shutdownSubscription(ctx, t, sub)
 	mr, err := sub.Receive(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -241,7 +252,7 @@ func TestConcurrentDoubleAckCausesPanic(t *testing.T) {
 		},
 	}
 	sub := pubsub.NewSubscription(ds, nil, nil)
-	defer sub.Shutdown(ctx)
+	defer shutdownSubscription(ctx, t, sub)
 	mr, err := sub.Receive(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -251,7 +262,7 @@ func TestConcurrentDoubleAckCausesPanic(t *testing.T) {
 	var mu sync.Mutex
 	panics := 0
 	var wg sync.WaitGroup
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -294,7 +305,9 @@ func TestSubShutdownCanBeCanceledEvenWithHangingSendAcks(t *testing.T) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 		defer cancel()
-		sub.Shutdown(ctx)
+		if err := sub.Shutdown(ctx); err == nil {
+			t.Error("expected error from Shutdown, got nil")
+		}
 		close(done)
 	}()
 	tooLong := 5 * time.Second
@@ -323,7 +336,7 @@ func TestReceiveReturnsErrorFromSendAcks(t *testing.T) {
 		},
 	}
 	sub := pubsub.NewSubscription(ds, nil, nil)
-	defer sub.Shutdown(ctx)
+	defer shutdownSubscription(ctx, t, sub)
 	m, err := sub.Receive(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -337,7 +350,7 @@ func TestReceiveReturnsErrorFromSendAcks(t *testing.T) {
 	defer cancel()
 	for {
 		_, err = sub.Receive(ctx)
-		if gcerrors.Code(err) == gcerrors.Internal && err.(*gcerr.Error).Unwrap() == serr {
+		if gcerrors.Code(err) == gcerrors.Internal && errors.Is(err, serr) {
 			break // success
 		}
 		if err != nil {
@@ -381,7 +394,7 @@ func TestReceiveReturnsAckErrorOnNoMoreMessages(t *testing.T) {
 	serr := errors.New("unrecoverable error")
 	receiveHappened := make(chan struct{})
 	ackHappened := make(chan struct{})
-	var ds = &callbackDriverSub{
+	ds := &callbackDriverSub{
 		// First call to receiveBatch will return a single message.
 		receiveBatch: func(context.Context) ([]*driver.Message, error) {
 			ms := []*driver.Message{{AckID: 1}}
@@ -393,7 +406,7 @@ func TestReceiveReturnsAckErrorOnNoMoreMessages(t *testing.T) {
 		},
 	}
 	sub := pubsub.NewSubscription(ds, nil, nil)
-	defer sub.Shutdown(ctx)
+	defer shutdownSubscription(ctx, t, sub)
 	m, err := sub.Receive(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -435,7 +448,7 @@ func TestReceiveReturnsAckErrorOnNoMoreMessages(t *testing.T) {
 	if got := gcerrors.Code(err); got != gcerrors.Internal {
 		t.Fatalf("error code = %v; want %v", got, gcerrors.Internal)
 	}
-	if got := xerrors.Unwrap(err); got != serr {
-		t.Errorf("error = %v; want %v", got, serr)
+	if !errors.Is(err, serr) {
+		t.Errorf("error = %v; want errors.Is(%v) to return true", err, serr)
 	}
 }

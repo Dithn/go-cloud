@@ -17,13 +17,12 @@ package etcdvar
 import (
 	"context"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"go.etcd.io/etcd/clientv3"
-	"go.etcd.io/etcd/etcdserver/api/v3rpc/rpctypes"
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
+	"go.etcd.io/etcd/client/v3"
 	"gocloud.dev/internal/testing/setup"
 	"gocloud.dev/runtimevar"
 	"gocloud.dev/runtimevar/driver"
@@ -99,6 +98,9 @@ func (verifyAs) ErrorCheck(v *runtimevar.Variable, err error) error {
 	if !v.ErrorAs(rpctypes.ErrUnhealthy, &to) {
 		return errors.New("ErrorAs expected to succeed with real etcd error")
 	}
+	if !errors.As(rpctypes.ErrUnhealthy, &to) {
+		return errors.New("errors.As succeed with real etcd error")
+	}
 	return nil
 }
 
@@ -133,7 +135,11 @@ func TestNoConnectionError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer v.Close()
+	defer func() {
+		if err := v.Close(); err != nil {
+			t.Errorf("failed to Close: %v", err)
+		}
+	}()
 	// Watch will block for quite a while trying to connect,
 	// so use a short timeout.
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
@@ -149,7 +155,7 @@ func TestOpenVariable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	os.Setenv("ETCD_SERVER_URL", "http://localhost:2379")
+	t.Setenv("ETCD_SERVER_URL", "http://localhost:2379")
 
 	ctx := context.Background()
 	if err := h.CreateVariable(ctx, "string-var", []byte("hello world")); err != nil {
@@ -163,7 +169,7 @@ func TestOpenVariable(t *testing.T) {
 		URL          string
 		WantErr      bool
 		WantWatchErr bool
-		Want         interface{}
+		Want         any
 	}{
 		// Nonexistentvar does not exist, so we get an error from Watch.
 		{"etcd://nonexistentvar", false, true, nil},
@@ -176,7 +182,7 @@ func TestOpenVariable(t *testing.T) {
 		// Working example with default decoder.
 		{"etcd://string-var", false, false, []byte("hello world")},
 		// Working example with JSON decoder.
-		{"etcd://json-var?decoder=jsonmap", false, false, &map[string]interface{}{"Foo": "Bar"}},
+		{"etcd://json-var?decoder=jsonmap", false, false, &map[string]any{"Foo": "Bar"}},
 	}
 
 	for _, test := range tests {
@@ -188,7 +194,11 @@ func TestOpenVariable(t *testing.T) {
 			if err != nil {
 				return
 			}
-			defer v.Close()
+			defer func(v *runtimevar.Variable) {
+				if err := v.Close(); err != nil {
+					t.Errorf("failed to Close: %v", err)
+				}
+			}(v)
 			snapshot, err := v.Watch(ctx)
 			if (err != nil) != test.WantWatchErr {
 				t.Errorf("%s: got Watch error %v, want error %v", test.URL, err, test.WantWatchErr)

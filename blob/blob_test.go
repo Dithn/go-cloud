@@ -22,7 +22,6 @@ import (
 	"io"
 	"net/url"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -35,6 +34,13 @@ var (
 	errFake     = errors.New("fake")
 	errNotFound = errors.New("fake not found")
 )
+
+func closeWithErrorCheck(t *testing.T, c io.Closer) {
+	t.Helper()
+	if err := c.Close(); err != nil {
+		t.Errorf("failed to close: %v", err)
+	}
+}
 
 func TestExists(t *testing.T) {
 	tests := []struct {
@@ -67,7 +73,7 @@ func TestExists(t *testing.T) {
 		t.Run(test.Description, func(t *testing.T) {
 			drv := &fakeAttributes{attributesErr: test.Err}
 			b := NewBucket(drv)
-			defer b.Close()
+			defer closeWithErrorCheck(t, b)
 			got, gotErr := b.Exists(context.Background(), "key")
 			if got != test.Want {
 				t.Errorf("got %v want %v", got, test.Want)
@@ -111,7 +117,7 @@ func TestListIterator(t *testing.T) {
 		wantPageSizes: []int{0, 0, 0, 0, 0, 0},
 	}
 	b := NewBucket(db)
-	defer b.Close()
+	defer closeWithErrorCheck(t, b)
 	iter := b.List(nil)
 	var got []string
 	for {
@@ -138,7 +144,7 @@ func TestListPage(t *testing.T) {
 		wantPageSizes: []int{2, 2, 2, 2, 2, 1, 1, 2, 2, 2},
 	}
 	b := NewBucket(db)
-	defer b.Close()
+	defer closeWithErrorCheck(t, b)
 
 	nextToken := FirstPageToken
 	got := [][]string{}
@@ -194,13 +200,412 @@ func (b *fakeLister) ListPaged(ctx context.Context, opts *driver.ListOptions) (*
 func (*fakeLister) Close() error                           { return nil }
 func (*fakeLister) ErrorCode(err error) gcerrors.ErrorCode { return gcerrors.Unknown }
 
+type stubReader struct {
+	driver.Reader
+	downloaded bool
+}
+
+func (r *stubReader) Download(w io.Writer) error {
+	r.downloaded = true
+	return nil
+}
+
+func (*stubReader) Close() error { return nil }
+
+type stubWriter struct {
+	driver.Writer
+	uploaded bool
+}
+
+func (w *stubWriter) Upload(r io.Reader) error {
+	w.uploaded = true
+	return nil
+}
+
+func (w *stubWriter) Write(p []byte) (n int, err error) {
+	return len(p), nil
+}
+
+func (*stubWriter) Close() error { return nil }
+
+// loaderBucket implements driver.Bucket's NewTypedWriter and NewRangedReader methods,
+// returning stubReader and stubWriter. It is used to verify that the special driver.Uploader
+// and driver.Downloader overrides work when called.
+type loaderBucket struct {
+	driver.Bucket
+	w stubWriter
+	r stubReader
+}
+
+func (b *loaderBucket) NewTypedWriter(ctx context.Context, key, contentType string, opts *driver.WriterOptions) (driver.Writer, error) {
+	return &b.w, nil
+}
+
+func (b *loaderBucket) NewRangeReader(ctx context.Context, key string, offset, length int64, opts *driver.ReaderOptions) (driver.Reader, error) {
+	return &b.r, nil
+}
+
+func (*loaderBucket) Close() error { return nil }
+
+func TestUploader(t *testing.T) {
+	ctx := context.Background()
+	lb := &loaderBucket{}
+	b := NewBucket(lb)
+	defer closeWithErrorCheck(t, b)
+	err := b.Upload(ctx, "key", nil, &WriterOptions{ContentType: "text/html"})
+	if err != nil {
+		t.Fatalf("Upload failed: %v", err)
+	}
+	if !lb.w.uploaded {
+		t.Error("Uploader wasn't called")
+	}
+}
+
+func TestDownloader(t *testing.T) {
+	ctx := context.Background()
+	lb := &loaderBucket{}
+	b := NewBucket(lb)
+	defer closeWithErrorCheck(t, b)
+	err := b.Download(ctx, "key", nil, nil)
+	if err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	if !lb.r.downloaded {
+		t.Error("Downloader wasn't called")
+	}
+}
+
+// memWriterAt is a minimal in-memory io.Writer + io.WriterAt, like *os.File,
+// used to exercise the Download path that routes to driver.DownloaderAt.
+type memWriterAt struct{ data []byte }
+
+func (m *memWriterAt) Write(p []byte) (int, error) {
+	m.data = append(m.data, p...)
+	return len(p), nil
+}
+
+func (m *memWriterAt) WriteAt(p []byte, off int64) (int, error) {
+	if end := int(off) + len(p); end > len(m.data) {
+		m.data = append(m.data, make([]byte, end-len(m.data))...)
+	}
+	copy(m.data[off:], p)
+	return len(p), nil
+}
+
+// downloaderAtBucket implements NewRangeReader (returning a stubReader) and the
+// optional driver.DownloaderAt, each recording whether it was called.
+type downloaderAtBucket struct {
+	driver.Bucket
+	r            stubReader
+	w            stubWriter
+	downloadedAt bool
+	gotReadOpts  *driver.ReaderOptions
+	gotWriteOpts *driver.WriterOptions
+}
+
+func (b *downloaderAtBucket) NewRangeReader(ctx context.Context, key string, offset, length int64, opts *driver.ReaderOptions) (driver.Reader, error) {
+	return &b.r, nil
+}
+
+func (b *downloaderAtBucket) DownloadAt(ctx context.Context, key string, w io.WriterAt, opts *driver.ReaderOptions) error {
+	b.downloadedAt = true
+	b.gotReadOpts = opts
+	return nil
+}
+
+func (b *downloaderAtBucket) NewTypedWriter(ctx context.Context, key, contentType string, opts *driver.WriterOptions) (driver.Writer, error) {
+	b.gotWriteOpts = opts
+	return &b.w, nil
+}
+
+func (*downloaderAtBucket) Close() error { return nil }
+
+func TestDownloaderAt(t *testing.T) {
+	ctx := context.Background()
+	parallel := &ReaderOptions{AllowParallelDownload: true}
+
+	// AllowParallelDownload + io.WriterAt destination + driver implements
+	// DownloaderAt: DownloadAt is used.
+	b1 := &downloaderAtBucket{}
+	bucket1 := NewBucket(b1)
+	defer closeWithErrorCheck(t, bucket1)
+	if err := bucket1.Download(ctx, "key", &memWriterAt{}, parallel); err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	if !b1.downloadedAt {
+		t.Error("DownloadAt wasn't called with AllowParallelDownload and an io.WriterAt destination")
+	}
+	if b1.r.downloaded {
+		t.Error("reader Download was called; expected DownloadAt")
+	}
+
+	// Without AllowParallelDownload: falls back to the reader even though the
+	// destination is an io.WriterAt and the driver implements DownloaderAt.
+	b2 := &downloaderAtBucket{}
+	bucket2 := NewBucket(b2)
+	defer closeWithErrorCheck(t, bucket2)
+	if err := bucket2.Download(ctx, "key", &memWriterAt{}, nil); err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	if b2.downloadedAt {
+		t.Error("DownloadAt was called without AllowParallelDownload")
+	}
+	if !b2.r.downloaded {
+		t.Error("reader Download wasn't called without AllowParallelDownload")
+	}
+
+	// AllowParallelDownload but a non-io.WriterAt destination: falls back to the
+	// reader.
+	b3 := &downloaderAtBucket{}
+	bucket3 := NewBucket(b3)
+	defer closeWithErrorCheck(t, bucket3)
+	if err := bucket3.Download(ctx, "key", &bytes.Buffer{}, parallel); err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	if b3.downloadedAt {
+		t.Error("DownloadAt was called for a non-io.WriterAt destination")
+	}
+	if !b3.r.downloaded {
+		t.Error("reader Download wasn't called for a non-io.WriterAt destination")
+	}
+
+	// AllowParallelDownload + io.WriterAt but the driver does not implement
+	// DownloaderAt: falls back to the reader.
+	b4 := &loaderBucket{}
+	bucket4 := NewBucket(b4)
+	defer closeWithErrorCheck(t, bucket4)
+	if err := bucket4.Download(ctx, "key", &memWriterAt{}, parallel); err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	if !b4.r.downloaded {
+		t.Error("reader Download wasn't called when the driver lacks DownloaderAt")
+	}
+}
+
+func TestDownloaderAtOptions(t *testing.T) {
+	ctx := context.Background()
+	b := &downloaderAtBucket{}
+	bucket := NewBucket(b)
+	defer closeWithErrorCheck(t, bucket)
+
+	if err := bucket.Download(ctx, "key", &memWriterAt{}, &ReaderOptions{
+		AllowParallelDownload: true,
+		BufferSize:            16 << 20,
+		MaxConcurrency:        8,
+	}); err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	if b.gotReadOpts == nil {
+		t.Fatal("DownloadAt wasn't called")
+	}
+	if got, want := b.gotReadOpts.BufferSize, 16<<20; got != want {
+		t.Errorf("BufferSize = %d, want %d", got, want)
+	}
+	if got, want := b.gotReadOpts.MaxConcurrency, 8; got != want {
+		t.Errorf("MaxConcurrency = %d, want %d", got, want)
+	}
+}
+
+func TestSetDefaultReaderOptions(t *testing.T) {
+	ctx := context.Background()
+
+	// BeforeRead is not allowlisted.
+	if err := NewBucket(&downloaderAtBucket{}).SetDefaultReaderOptions(ReaderOptions{
+		BeforeRead: func(func(any) bool) error { return nil },
+	}); err == nil {
+		t.Error("SetDefaultReaderOptions with BeforeRead should return an error")
+	}
+
+	// A default of AllowParallelDownload=true makes a nil-opts Download use the
+	// parallel path, and the part size/concurrency defaults flow to the driver.
+	b := &downloaderAtBucket{}
+	bucket := NewBucket(b)
+	defer closeWithErrorCheck(t, bucket)
+	if err := bucket.SetDefaultReaderOptions(ReaderOptions{
+		AllowParallelDownload: true,
+		BufferSize:            16 << 20,
+		MaxConcurrency:        8,
+	}); err != nil {
+		t.Fatalf("SetDefaultReaderOptions failed: %v", err)
+	}
+	if err := bucket.Download(ctx, "key", &memWriterAt{}, nil); err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	if !b.downloadedAt {
+		t.Error("DownloadAt wasn't called with a nil opts and a default of AllowParallelDownload=true")
+	}
+	if b.gotReadOpts == nil {
+		t.Fatal("DownloadAt wasn't called")
+	}
+	if got, want := b.gotReadOpts.BufferSize, 16<<20; got != want {
+		t.Errorf("BufferSize = %d, want %d", got, want)
+	}
+	if got, want := b.gotReadOpts.MaxConcurrency, 8; got != want {
+		t.Errorf("MaxConcurrency = %d, want %d", got, want)
+	}
+
+	// Without a default, a nil-opts Download falls back to the reader.
+	b2 := &downloaderAtBucket{}
+	bucket2 := NewBucket(b2)
+	defer closeWithErrorCheck(t, bucket2)
+	if err := bucket2.Download(ctx, "key", &memWriterAt{}, nil); err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	if b2.downloadedAt {
+		t.Error("DownloadAt was called without a default or per-call opt-in")
+	}
+	if !b2.r.downloaded {
+		t.Error("reader Download wasn't called")
+	}
+
+	// An explicit non-nil opts is used as-is; the default is not applied.
+	b3 := &downloaderAtBucket{}
+	bucket3 := NewBucket(b3)
+	defer closeWithErrorCheck(t, bucket3)
+	if err := bucket3.SetDefaultReaderOptions(ReaderOptions{AllowParallelDownload: true}); err != nil {
+		t.Fatalf("SetDefaultReaderOptions failed: %v", err)
+	}
+	if err := bucket3.Download(ctx, "key", &memWriterAt{}, &ReaderOptions{}); err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	if b3.downloadedAt {
+		t.Error("DownloadAt was called; an explicit opts should not inherit the default")
+	}
+}
+
+func TestSetDefaultWriterOptions(t *testing.T) {
+	ctx := context.Background()
+
+	// ContentMD5 is not allowlisted.
+	if err := NewBucket(&downloaderAtBucket{}).SetDefaultWriterOptions(WriterOptions{
+		ContentMD5: []byte("foo"),
+	}); err == nil {
+		t.Error("SetDefaultWriterOptions with ContentMD5 should return an error")
+	}
+
+	// BeforeWrite is not allowlisted.
+	if err := NewBucket(&downloaderAtBucket{}).SetDefaultWriterOptions(WriterOptions{
+		BeforeWrite: func(func(any) bool) error { return nil },
+	}); err == nil {
+		t.Error("SetDefaultWriterOptions with BeforeWrite should return an error")
+	}
+
+	// WriterOptions defaults flow to the driver.
+	b := &downloaderAtBucket{}
+	bucket := NewBucket(b)
+	defer closeWithErrorCheck(t, bucket)
+	if err := bucket.SetDefaultWriterOptions(WriterOptions{
+		BufferSize:     16 << 20,
+		MaxConcurrency: 8,
+	}); err != nil {
+		t.Fatalf("SetDefaultWriterOptions failed: %v", err)
+	}
+	if err := bucket.WriteAll(ctx, "key", []byte("contents"), nil); err != nil {
+		t.Fatalf("WriteAll failed: %v", err)
+	}
+	if b.gotWriteOpts == nil {
+		t.Fatal("NewTypedWriter wasn't called")
+	}
+	if got, want := b.gotWriteOpts.BufferSize, 16<<20; got != want {
+		t.Errorf("BufferSize = %d, want %d", got, want)
+	}
+	if got, want := b.gotWriteOpts.MaxConcurrency, 8; got != want {
+		t.Errorf("MaxConcurrency = %d, want %d", got, want)
+	}
+
+	// An explicit non-nil opts is used as-is; the default is not applied.
+	b.gotWriteOpts = nil
+	if err := bucket.WriteAll(ctx, "key", []byte("contents"), &WriterOptions{}); err != nil {
+		t.Fatalf("WriteAll failed: %v", err)
+	}
+	if b.gotWriteOpts == nil {
+		t.Error("NewTypedWriter wasn't called")
+	}
+	if got, want := b.gotWriteOpts.BufferSize, 0; got != want {
+		t.Errorf("BufferSize = %d, want %d", got, want)
+	}
+	if got, want := b.gotWriteOpts.MaxConcurrency, 0; got != want {
+		t.Errorf("MaxConcurrency = %d, want %d", got, want)
+	}
+}
+
+func TestSeekAfterReadFailure(t *testing.T) {
+	const filename = "f.txt"
+
+	ctx := context.Background()
+
+	bucket := NewBucket(&oneTimeReadBucket{first: true})
+	defer closeWithErrorCheck(t, bucket)
+
+	reader, err := bucket.NewRangeReader(ctx, filename, 0, 100, nil)
+	if err != nil {
+		t.Fatalf("failed NewRangeReader: %v", err)
+	}
+	defer closeWithErrorCheck(t, reader)
+
+	b := make([]byte, 10)
+
+	_, err = reader.Read(b)
+	if err != nil {
+		t.Fatalf("failed Read#1: %v", err)
+	}
+
+	_, err = reader.Seek(0, io.SeekStart)
+	if err != nil {
+		t.Fatalf("failed Seek#1: %v", err)
+	}
+
+	// This Read will force a recreation of the reader via NewRangeReader,
+	// which will fail.
+	_, err = reader.Read(b)
+	if err == nil {
+		t.Fatalf("unexpectedly succeeded Read#2: %v", err)
+	}
+
+	_, err = reader.Seek(0, io.SeekStart)
+	if err != nil {
+		t.Fatalf("failed Seek#2: %v", err)
+	}
+}
+
+// oneTimeReadBucket implements driver.Bucket for TestSeekAfterReadFailure.
+// It returns a fake reader that succeeds once, then fails.
+type oneTimeReadBucket struct {
+	driver.Bucket
+	first bool
+}
+
+type workingReader struct {
+	driver.Reader
+}
+
+func (r *workingReader) Read(p []byte) (int, error) {
+	return len(p), nil
+}
+
+func (r *workingReader) Attributes() *driver.ReaderAttributes { return &driver.ReaderAttributes{} }
+func (r *workingReader) Close() error                         { return nil }
+
+func (b *oneTimeReadBucket) NewRangeReader(ctx context.Context, key string, offset, length int64, opts *driver.ReaderOptions) (driver.Reader, error) {
+	if b.first {
+		b.first = false
+		return &workingReader{}, nil
+	}
+	return nil, errFake
+}
+
+func (b *oneTimeReadBucket) ErrorCode(err error) gcerrors.ErrorCode { return gcerrors.Unknown }
+func (b *oneTimeReadBucket) Close() error                           { return nil }
+
 // erroringBucket implements driver.Bucket. All interface methods that return
-// errors are implemented, and return errFake.
+// errors are implemented, and return errFake, except Close which depends on
+// closeErr.
 // In addition, when passed the key "work", NewRangeReader and NewTypedWriter
 // will return a Reader/Writer respectively, that always return errFake
 // from Read/Write and Close.
 type erroringBucket struct {
 	driver.Bucket
+	closeErr error
 }
 
 type erroringReader struct {
@@ -242,7 +647,7 @@ func (b *erroringBucket) NewRangeReader(ctx context.Context, key string, offset,
 	return nil, errFake
 }
 
-func (b *erroringBucket) NewTypedWriter(ctx context.Context, key string, contentType string, opts *driver.WriterOptions) (driver.Writer, error) {
+func (b *erroringBucket) NewTypedWriter(ctx context.Context, key, contentType string, opts *driver.WriterOptions) (driver.Writer, error) {
 	if key == "work" {
 		return &erroringWriter{}, nil
 	}
@@ -253,7 +658,7 @@ func (b *erroringBucket) Copy(ctx context.Context, dstKey, srcKey string, opts *
 	return errFake
 }
 
-func (b *erroringBucket) Delete(ctx context.Context, key string) error {
+func (b *erroringBucket) Delete(ctx context.Context, key string, opts *driver.DeleteOptions) error {
 	return errFake
 }
 
@@ -262,7 +667,7 @@ func (b *erroringBucket) SignedURL(ctx context.Context, key string, opts *driver
 }
 
 func (b *erroringBucket) Close() error {
-	return errFake
+	return b.closeErr
 }
 
 func (b *erroringBucket) ErrorCode(err error) gcerrors.ErrorCode {
@@ -274,7 +679,7 @@ func (b *erroringBucket) ErrorCode(err error) gcerrors.ErrorCode {
 func TestErrorsAreWrapped(t *testing.T) {
 	ctx := context.Background()
 	buf := bytes.Repeat([]byte{'A'}, sniffLen)
-	b := NewBucket(&erroringBucket{})
+	b := NewBucket(&erroringBucket{closeErr: errFake})
 
 	// verifyWrap ensures that err is wrapped exactly once.
 	verifyWrap := func(description string, err error) {
@@ -284,6 +689,9 @@ func TestErrorsAreWrapped(t *testing.T) {
 		}
 		if _, ok := err.(*gcerr.Error); !ok {
 			t.Errorf("%s: not wrapped: %v", description, err)
+		}
+		if !errors.Is(err, errFake) {
+			t.Errorf("error.Is failed for errFake on %v", err)
 		}
 		if s := err.Error(); !strings.HasPrefix(s, "blob ") {
 			t.Logf("short form of error: %v", err)
@@ -315,7 +723,7 @@ func TestErrorsAreWrapped(t *testing.T) {
 	w, _ := b.NewWriter(ctx, "", nil)
 	_, err = w.Write(buf)
 	verifyWrap("NewWriter (no ContentType)", err)
-	w.Close()
+	_ = w.Close()
 	err = b.WriteAll(ctx, "", buf, nil)
 	verifyWrap("WriteAll (no ContentType)", err)
 
@@ -338,6 +746,8 @@ func TestErrorsAreWrapped(t *testing.T) {
 
 	err = b.Delete(ctx, "")
 	verifyWrap("Delete", err)
+	err = b.DeleteWithOptions(ctx, "", nil)
+	verifyWrap("DeleteWithOptions", err)
 
 	_, err = b.SignedURL(ctx, "", nil)
 	verifyWrap("SignedURL", err)
@@ -346,11 +756,6 @@ func TestErrorsAreWrapped(t *testing.T) {
 	verifyWrap("Close", err)
 }
 
-var (
-	testOpenOnce sync.Once
-	testOpenGot  *url.URL
-)
-
 // TestBucketIsClosed verifies that all Bucket functions return an error
 // if the Bucket is closed.
 func TestBucketIsClosed(t *testing.T) {
@@ -358,7 +763,7 @@ func TestBucketIsClosed(t *testing.T) {
 	buf := bytes.Repeat([]byte{'A'}, sniffLen)
 
 	bucket := NewBucket(&erroringBucket{})
-	bucket.Close()
+	closeWithErrorCheck(t, bucket)
 
 	if _, err := bucket.Attributes(ctx, ""); err != errClosed {
 		t.Error(err)
@@ -387,6 +792,9 @@ func TestBucketIsClosed(t *testing.T) {
 		t.Error(err)
 	}
 	if err := bucket.Delete(ctx, ""); err != errClosed {
+		t.Error(err)
+	}
+	if err := bucket.DeleteWithOptions(ctx, "", nil); err != errClosed {
 		t.Error(err)
 	}
 	if _, err := bucket.SignedURL(ctx, "", nil); err != errClosed {

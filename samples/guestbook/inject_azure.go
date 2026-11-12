@@ -19,10 +19,12 @@ package main
 
 import (
 	"context"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 
-	"github.com/Azure/azure-pipeline-go/pipeline"
+	azcontainer "github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/google/wire"
-	"go.opencensus.io/trace"
 	"gocloud.dev/blob"
 	"gocloud.dev/blob/azureblob"
 	"gocloud.dev/runtimevar"
@@ -43,22 +45,30 @@ func setupAzure(ctx context.Context, flags *cliFlags) (*server.Server, func(), e
 	// wire.Build.
 	wire.Build(
 		wire.InterfaceValue(new(requestlog.Logger), requestlog.Logger(nil)),
-		wire.InterfaceValue(new(trace.Exporter), trace.Exporter(nil)),
-		azureblob.NewPipeline,
-		azureblob.DefaultIdentity,
+		azureblob.NewDefaultServiceURLOptions,
+		azureblob.NewDefaultClient,
+		azureblob.NewServiceURL,
 		applicationSet,
+		bucketName,
 		azureBucket,
 		azureMOTDVar,
 		server.Set,
+		wire.InterfaceValue(new(propagation.TextMapPropagator), propagation.TextMapPropagator(nil)),
+		wire.InterfaceValue(new(trace.TracerProvider), trace.TracerProvider(nil)),
+		wire.InterfaceValue(new(metric.MeterProvider), metric.MeterProvider(nil)),
 		dialLocalSQL,
 	)
 	return nil, nil, nil
 }
 
+func bucketName(flags *cliFlags) azureblob.ContainerName {
+	return azureblob.ContainerName(flags.bucket)
+}
+
 // azureBucket is a Wire provider function that returns the Azure bucket based
 // on the command-line flags.
-func azureBucket(ctx context.Context, p pipeline.Pipeline, accountName azureblob.AccountName, flags *cliFlags) (*blob.Bucket, func(), error) {
-	b, err := azureblob.OpenBucket(ctx, p, accountName, flags.bucket, nil)
+func azureBucket(ctx context.Context, client *azcontainer.Client, flags *cliFlags) (*blob.Bucket, func(), error) {
+	b, err := azureblob.OpenBucket(ctx, client, nil)
 	if err != nil {
 		return nil, nil, err
 	}

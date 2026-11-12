@@ -26,24 +26,32 @@ import (
 
 // RunBenchmarks runs benchmarks for docstore drivers.
 func RunBenchmarks(b *testing.B, coll *docstore.Collection) {
-	defer coll.Close()
-	clearCollection(b, coll)
+	b.Helper()
+
+	defer func() {
+		if err := coll.Close(); err != nil {
+			b.Errorf("failed to close: %v", err)
+		}
+	}()
+	ClearCollection(b, coll)
 	b.Run("BenchmarkSingleActionPut", func(b *testing.B) {
-		benchmarkSingleActionPut(10, b, coll)
+		benchmarkSingleActionPut(b, 10, coll)
 	})
 	b.Run("BenchmarkSingleActionGet", func(b *testing.B) {
-		benchmarkSingleActionGet(10, b, coll)
+		benchmarkSingleActionGet(b, 10, coll)
 	})
 	b.Run("BenchmarkActionListPut", func(b *testing.B) {
-		benchmarkActionListPut(50, b, coll)
+		benchmarkActionListPut(b, 50, coll)
 	})
 	b.Run("BenchmarkActionListGet", func(b *testing.B) {
-		benchmarkActionListGet(100, b, coll)
+		benchmarkActionListGet(b, 100, coll)
 	})
-	clearCollection(b, coll)
+	ClearCollection(b, coll)
 }
 
-func benchmarkSingleActionPut(n int, b *testing.B, coll *docstore.Collection) {
+func benchmarkSingleActionPut(b *testing.B, n int, coll *docstore.Collection) {
+	b.Helper()
+
 	ctx := context.Background()
 	const baseKey = "benchmarksingleaction-put-"
 	var nextID uint32
@@ -51,7 +59,7 @@ func benchmarkSingleActionPut(n int, b *testing.B, coll *docstore.Collection) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			for i := 0; i < n; i++ {
+			for range n {
 				key := fmt.Sprintf("%s%d", baseKey, atomic.AddUint32(&nextID, 1))
 				doc := docmap{KeyField: key, "S": key}
 				if err := coll.Put(ctx, doc); err != nil {
@@ -60,14 +68,17 @@ func benchmarkSingleActionPut(n int, b *testing.B, coll *docstore.Collection) {
 			}
 		}
 	})
+	b.ReportMetric(float64(n), "items/op")
 }
 
-func benchmarkSingleActionGet(n int, b *testing.B, coll *docstore.Collection) {
+func benchmarkSingleActionGet(b *testing.B, n int, coll *docstore.Collection) {
+	b.Helper()
+
 	ctx := context.Background()
 	const baseKey = "benchmarksingleaction-get-"
 	docs := make([]docmap, n)
 	puts := coll.Actions()
-	for i := 0; i < n; i++ {
+	for i := range n {
 		docs[i] = docmap{KeyField: baseKey + strconv.Itoa(i), "n": i}
 		puts.Put(docs[i])
 	}
@@ -86,9 +97,12 @@ func benchmarkSingleActionGet(n int, b *testing.B, coll *docstore.Collection) {
 			}
 		}
 	})
+	b.ReportMetric(float64(n), "items/op")
 }
 
-func benchmarkActionListPut(n int, b *testing.B, coll *docstore.Collection) {
+func benchmarkActionListPut(b *testing.B, n int, coll *docstore.Collection) {
+	b.Helper()
+
 	ctx := context.Background()
 	const baseKey = "benchmarkactionlist-put-"
 	var nextID uint32
@@ -97,7 +111,7 @@ func benchmarkActionListPut(n int, b *testing.B, coll *docstore.Collection) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			actions := coll.Actions()
-			for i := 0; i < n; i++ {
+			for range n {
 				key := fmt.Sprintf("%s%d", baseKey, atomic.AddUint32(&nextID, 1))
 				doc := docmap{KeyField: key, "S": key}
 				actions.Put(doc)
@@ -107,14 +121,17 @@ func benchmarkActionListPut(n int, b *testing.B, coll *docstore.Collection) {
 			}
 		}
 	})
+	b.ReportMetric(float64(n), "items/op")
 }
 
-func benchmarkActionListGet(n int, b *testing.B, coll *docstore.Collection) {
+func benchmarkActionListGet(b *testing.B, n int, coll *docstore.Collection) {
+	b.Helper()
+
 	ctx := context.Background()
 	const baseKey = "benchmarkactionlist-get-"
 	docs := make([]docmap, n)
 	puts := coll.Actions()
-	for i := 0; i < n; i++ {
+	for i := range n {
 		docs[i] = docmap{KeyField: baseKey + strconv.Itoa(i), "n": i}
 		puts.Put(docs[i])
 	}
@@ -135,4 +152,5 @@ func benchmarkActionListGet(n int, b *testing.B, coll *docstore.Collection) {
 			}
 		}
 	})
+	b.ReportMetric(float64(n), "items/op")
 }

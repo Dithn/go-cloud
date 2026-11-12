@@ -67,7 +67,9 @@ func TestReceive(t *testing.T) {
 	for _, m := range msgs {
 		ackIDs = append(ackIDs, m.AckID)
 	}
-	sub.SendAcks(ctx, ackIDs)
+	if err := sub.SendAcks(ctx, ackIDs); err != nil {
+		t.Errorf("failed to send Acks: %v", err)
+	}
 	// They will never be delivered again, even if we wait past the ack deadline.
 	now = now.Add(time.Hour)
 	msgs = sub.receiveNoWait(now, 10)
@@ -94,7 +96,9 @@ func TestOpenTopicFromURL(t *testing.T) {
 			t.Errorf("%s: got error %v, want error %v", test.URL, err, test.WantErr)
 		}
 		if topic != nil {
-			topic.Shutdown(ctx)
+			if err := topic.Shutdown(ctx); err != nil {
+				t.Errorf("failed to Shutdown: %v", err)
+			}
 		}
 	}
 }
@@ -117,14 +121,18 @@ func TestOpenSubscriptionFromURL(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	pubsub.OpenTopic(ctx, "mem://mytopic")
+	if _, err := pubsub.OpenTopic(ctx, "mem://mytopic"); err != nil {
+		t.Fatalf("failed to open: %v", err)
+	}
 	for _, test := range tests {
 		sub, err := pubsub.OpenSubscription(ctx, test.URL)
 		if (err != nil) != test.WantErr {
 			t.Errorf("%s: got error %v, want error %v", test.URL, err, test.WantErr)
 		}
 		if sub != nil {
-			sub.Shutdown(ctx)
+			if err := sub.Shutdown(ctx); err != nil {
+				t.Errorf("failed to Shutdown: %v", err)
+			}
 		}
 	}
 }
@@ -134,8 +142,43 @@ func TestSendNoSubs(t *testing.T) {
 	// (But it will log a warning: that is untested.)
 	ctx := context.Background()
 	topic := NewTopic()
-	defer topic.Shutdown(ctx)
+	defer func() {
+		if err := topic.Shutdown(ctx); err != nil {
+			t.Errorf("failed to Shutdown: %v", err)
+		}
+	}()
 	if err := topic.Send(ctx, &pubsub.Message{Body: []byte("OK")}); err != nil {
 		t.Fatal(err)
 	}
 }
+
+/*
+// This test runs forever, so it's commented out. It's useful for playing
+// around with batching. Add a Printf in ../pubsub.go that prints the batch size.
+func TestReceiveBatching(t *testing.T) {
+	ctx := context.Background()
+	topic := NewTopic()
+	defer topic.Shutdown(ctx)
+	sub := NewSubscriptionWithOptions(topic, 10*time.Second, &SubscriptionOptions{ReceiveBatcherOptions: batcher.Options{MaxBatchSize: 10, MaxHandlers: 100}})
+	defer sub.Shutdown(ctx)
+
+	// Receive messages as quickly as possible.
+	go func() {
+		for {
+			msg, _ := sub.Receive(ctx)
+			if msg != nil {
+				msg.Ack()
+			}
+		}
+	}()
+
+	// Send slightly slower than the 250ms Sleep.
+	for {
+		if err := topic.Send(ctx, &pubsub.Message{Body: []byte("a")}); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(333 * time.Millisecond)
+	}
+	// With the above parameters, ideally the batch size would settle down to around 2.
+}
+*/

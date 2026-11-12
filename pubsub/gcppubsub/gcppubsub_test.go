@@ -23,12 +23,12 @@ import (
 	"testing"
 
 	raw "cloud.google.com/go/pubsub/apiv1"
+	"cloud.google.com/go/pubsub/apiv1/pubsubpb"
 	"gocloud.dev/gcp"
 	"gocloud.dev/internal/testing/setup"
 	"gocloud.dev/pubsub"
 	"gocloud.dev/pubsub/driver"
 	"gocloud.dev/pubsub/drivertest"
-	pubsubpb "google.golang.org/genproto/googleapis/pubsub/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -36,6 +36,20 @@ import (
 // projectID is the project ID that was used during the last test run using
 // --record.
 const projectID = "go-cloud-test-216917"
+
+func shutdownTopic(ctx context.Context, t testing.TB, topic *pubsub.Topic) {
+	t.Helper()
+	if err := topic.Shutdown(ctx); err != nil {
+		t.Errorf("failed to Shutdown topic: %v", err)
+	}
+}
+
+func shutdownSubscription(ctx context.Context, t testing.TB, sub *pubsub.Subscription) {
+	t.Helper()
+	if err := sub.Shutdown(ctx); err != nil {
+		t.Errorf("failed to Shutdown subscription: %v", err)
+	}
+}
 
 type harness struct {
 	closer    func()
@@ -46,14 +60,16 @@ type harness struct {
 }
 
 func newHarness(ctx context.Context, t *testing.T) (drivertest.Harness, error) {
+	t.Helper()
+
 	conn, done := setup.NewGCPgRPCConn(ctx, t, endPoint, "pubsub")
 	pubClient, err := PublisherClient(ctx, conn)
 	if err != nil {
-		return nil, fmt.Errorf("making publisher client: %v", err)
+		return nil, fmt.Errorf("making publisher client: %w", err)
 	}
 	subClient, err := SubscriberClient(ctx, conn)
 	if err != nil {
-		return nil, fmt.Errorf("making subscription client: %v", err)
+		return nil, fmt.Errorf("making subscription client: %w", err)
 	}
 	return &harness{closer: done, pubClient: pubClient, subClient: subClient, numTopics: 0, numSubs: 0}, nil
 }
@@ -69,7 +85,7 @@ func (h *harness) CreateTopic(ctx context.Context, testName string) (dt driver.T
 		dt, cleanup, err := createTopic(ctx, h.pubClient, topicName, topicPath)
 		if err != nil && status.Code(err) == codes.AlreadyExists {
 			// Delete the topic and retry.
-			h.pubClient.DeleteTopic(ctx, &pubsubpb.DeleteTopicRequest{Topic: topicPath})
+			_ = h.pubClient.DeleteTopic(ctx, &pubsubpb.DeleteTopicRequest{Topic: topicPath})
 			continue
 		}
 		return dt, cleanup, err
@@ -83,7 +99,7 @@ func createTopic(ctx context.Context, pubClient *raw.PublisherClient, topicName,
 	}
 	dt = openTopic(pubClient, path.Join("projects", projectID, "topics", topicName))
 	cleanup = func() {
-		pubClient.DeleteTopic(ctx, &pubsubpb.DeleteTopicRequest{Topic: topicPath})
+		_ = pubClient.DeleteTopic(ctx, &pubsubpb.DeleteTopicRequest{Topic: topicPath})
 	}
 	return dt, cleanup, nil
 }
@@ -103,7 +119,7 @@ func (h *harness) CreateSubscription(ctx context.Context, dt driver.Topic, testN
 		ds, cleanup, err := createSubscription(ctx, h.subClient, dt, subName, subPath)
 		if err != nil && status.Code(err) == codes.AlreadyExists {
 			// Delete the subscription and retry.
-			h.subClient.DeleteSubscription(ctx, &pubsubpb.DeleteSubscriptionRequest{Subscription: subPath})
+			_ = h.subClient.DeleteSubscription(ctx, &pubsubpb.DeleteSubscriptionRequest{Subscription: subPath})
 			continue
 		}
 		return ds, cleanup, err
@@ -121,7 +137,7 @@ func createSubscription(ctx context.Context, subClient *raw.SubscriberClient, dt
 	}
 	ds = openSubscription(subClient, path.Join("projects", projectID, "subscriptions", subName), nil)
 	cleanup = func() {
-		subClient.DeleteSubscription(ctx, &pubsubpb.DeleteSubscriptionRequest{Subscription: subPath})
+		_ = subClient.DeleteSubscription(ctx, &pubsubpb.DeleteSubscriptionRequest{Subscription: subPath})
 	}
 	return ds, cleanup, nil
 }
@@ -131,8 +147,8 @@ func (h *harness) MakeNonexistentSubscription(ctx context.Context) (driver.Subsc
 }
 
 func (h *harness) Close() {
-	h.pubClient.Close()
-	h.subClient.Close()
+	_ = h.pubClient.Close()
+	_ = h.subClient.Close()
 	h.closer()
 }
 
@@ -174,7 +190,7 @@ func BenchmarkGcpPubSub(b *testing.B) {
 	}
 	defer cleanup1()
 	topic := pubsub.NewTopic(dt, nil)
-	defer topic.Shutdown(ctx)
+	defer shutdownTopic(ctx, b, topic)
 
 	// Make subscription.
 	sc, err := SubscriberClient(ctx, conn)
@@ -189,7 +205,7 @@ func BenchmarkGcpPubSub(b *testing.B) {
 	}
 	defer cleanup2()
 	sub := pubsub.NewSubscription(ds, defaultRecvBatcherOpts, ackBatcherOpts)
-	defer sub.Shutdown(ctx)
+	defer shutdownSubscription(ctx, b, sub)
 
 	drivertest.RunBenchmarks(b, topic, sub)
 }
@@ -227,7 +243,7 @@ func (gcpAsTest) SubscriptionCheck(sub *pubsub.Subscription) error {
 func (gcpAsTest) TopicErrorCheck(t *pubsub.Topic, err error) error {
 	var s *status.Status
 	if !t.ErrorAs(err, &s) {
-		return fmt.Errorf("failed to convert %v (%T) to a gRPC Status", err, err)
+		return fmt.Errorf("failed to convert %w (%T) to a gRPC Status", err, err)
 	}
 	if s.Code() != codes.NotFound {
 		return fmt.Errorf("got code %s, want NotFound", s.Code())
@@ -238,7 +254,7 @@ func (gcpAsTest) TopicErrorCheck(t *pubsub.Topic, err error) error {
 func (gcpAsTest) SubscriptionErrorCheck(sub *pubsub.Subscription, err error) error {
 	var s *status.Status
 	if !sub.ErrorAs(err, &s) {
-		return fmt.Errorf("failed to convert %v (%T) to a gRPC Status", err, err)
+		return fmt.Errorf("failed to convert %w (%T) to a gRPC Status", err, err)
 	}
 	if s.Code() != codes.NotFound {
 		return fmt.Errorf("got code %s, want NotFound", s.Code())
@@ -255,10 +271,14 @@ func (gcpAsTest) MessageCheck(m *pubsub.Message) error {
 	if !m.As(&ppm) {
 		return fmt.Errorf("cast failed for %T", &ppm)
 	}
+	var prm *pubsubpb.ReceivedMessage
+	if !m.As(&prm) {
+		return fmt.Errorf("cast failed for %T", &prm)
+	}
 	return nil
 }
 
-func (gcpAsTest) BeforeSend(as func(interface{}) bool) error {
+func (gcpAsTest) BeforeSend(as func(any) bool) error {
 	var ppm *pubsubpb.PubsubMessage
 	if !as(&ppm) {
 		return fmt.Errorf("cast failed for %T", &ppm)
@@ -266,7 +286,7 @@ func (gcpAsTest) BeforeSend(as func(interface{}) bool) error {
 	return nil
 }
 
-func (gcpAsTest) AfterSend(as func(interface{}) bool) error {
+func (gcpAsTest) AfterSend(as func(any) bool) error {
 	var msgId string
 	if !as(&msgId) {
 		return fmt.Errorf("cast failed for %T", &msgId)
@@ -298,7 +318,7 @@ func TestOpenTopic(t *testing.T) {
 		t.Fatal(err)
 	}
 	topic := OpenTopic(pc, projID, "my-topic", nil)
-	defer topic.Shutdown(ctx)
+	defer shutdownTopic(ctx, t, topic)
 	err = topic.Send(ctx, &pubsub.Message{Body: []byte("hello world")})
 	if err == nil {
 		t.Error("got nil, want error")
@@ -309,7 +329,7 @@ func TestOpenTopic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer topic.Shutdown(ctx)
+	defer shutdownTopic(ctx, t, topic)
 	err = topic.Send(ctx, &pubsub.Message{Body: []byte("hello world")})
 	if err == nil {
 		t.Error("got nil, want error")
@@ -342,7 +362,7 @@ func TestOpenSubscription(t *testing.T) {
 		t.Fatal(err)
 	}
 	sub := OpenSubscription(sc, projID, "my-subscription", nil)
-	defer sub.Shutdown(ctx)
+	defer shutdownSubscription(ctx, t, sub)
 	_, err = sub.Receive(ctx)
 	if err == nil {
 		t.Error("got nil, want error")
@@ -353,7 +373,7 @@ func TestOpenSubscription(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sub.Shutdown(ctx)
+	defer shutdownSubscription(ctx, t, sub)
 	_, err = sub.Receive(ctx)
 	if err == nil {
 		t.Error("got nil, want error")
@@ -380,6 +400,12 @@ func TestOpenTopicFromURL(t *testing.T) {
 		{"gcppubsub://projects/myproject/topic/mytopic", false},
 		// Invalid parameter.
 		{"gcppubsub://myproject/mytopic?param=value", true},
+		// Valid max_send_batch_size
+		{"gcppubsub://projects/mytopic?max_send_batch_size=1", false},
+		// Invalid max_send_batch_size
+		{"gcppubsub://projects/mytopic?max_send_batch_size=0", true},
+		// Invalid max_send_batch_size
+		{"gcppubsub://projects/mytopic?max_send_batch_size=1001", true},
 	}
 
 	ctx := context.Background()
@@ -389,7 +415,7 @@ func TestOpenTopicFromURL(t *testing.T) {
 			t.Errorf("%s: got error %v, want error %v", test.URL, err, test.WantErr)
 		}
 		if topic != nil {
-			topic.Shutdown(ctx)
+			shutdownTopic(ctx, t, topic)
 		}
 	}
 }
@@ -408,12 +434,16 @@ func TestOpenSubscriptionFromURL(t *testing.T) {
 		{"gcppubsub://projects/myproject/subscriptions/mysub", false},
 		// Invalid parameter.
 		{"gcppubsub://myproject/mysub?param=value", true},
-		// Valid parameters
+		// Valid max_recv_batch_size
 		{"gcppubsub://projects/myproject/subscriptions/mysub?max_recv_batch_size=1", false},
-		// Invalid parameters
+		// Invalid max_recv_batch_size
 		{"gcppubsub://projects/myproject/subscriptions/mysub?max_recv_batch_size=0", true},
-		// Invalid parameters
+		// Invalid max_recv_batch_size
 		{"gcppubsub://projects/myproject/subscriptions/mysub?max_recv_batch_size=1001", true},
+		// Valid nacklazy
+		{"gcppubsub://projects/myproject/subscriptions/mysub?nacklazy=true", false},
+		// Invalid nacklazy
+		{"gcppubsub://projects/myproject/subscriptions/mysub?nacklazy=foo", true},
 	}
 
 	ctx := context.Background()
@@ -423,7 +453,7 @@ func TestOpenSubscriptionFromURL(t *testing.T) {
 			t.Errorf("%s: got error %v, want error %v", test.URL, err, test.WantErr)
 		}
 		if sub != nil {
-			sub.Shutdown(ctx)
+			shutdownSubscription(ctx, t, sub)
 		}
 	}
 }

@@ -23,15 +23,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
@@ -56,6 +59,15 @@ type Harness interface {
 	// HTTPClient should return an unauthorized *http.Client, or nil.
 	// Required if the service supports SignedURL.
 	HTTPClient() *http.Client
+	// SupportsCopy should return true iff the driver supports Copy.
+	SupportsCopy() bool
+	// SupportsNonSlashDelimiters should return true iff the driver supports non-"/" delimiters.
+	SupportsNonSlashDelimiters() bool
+	// SkipDownloadAt should return true to skip the DownloadAt test.
+	// This is a temporary measure while maintainers down't have access to
+	// accounts in order to update record/replay tests.
+	// TODO(rvangent): Remove once we have accounts.
+	SkipDownloadAt() bool
 	// Close closes resources used by the harness.
 	Close()
 }
@@ -70,16 +82,23 @@ type HarnessMaker func(ctx context.Context, t *testing.T) (Harness, error)
 // 2. Creates a blob in a directory, using BeforeWrite as a WriterOption.
 // 3. Fetches the blob's attributes and calls AttributeCheck.
 // 4. Creates a Reader for the blob using BeforeReader as a ReaderOption,
-//    and calls ReaderCheck with the resulting Reader.
+//
+//	and calls ReaderCheck with the resulting Reader.
+//
 // 5. Calls List using BeforeList as a ListOption, with Delimiter set so
-//    that only the directory is returned, and calls ListObjectCheck
-//    on the single directory list entry returned.
+//
+//	that only the directory is returned, and calls ListObjectCheck
+//	on the single directory list entry returned.
+//
 // 6. Calls List using BeforeList as a ListOption, and calls ListObjectCheck
-//    on the single blob entry returned.
+//
+//	on the single blob entry returned.
+//
 // 7. Tries to read a non-existent blob, and calls ErrorCheck with the error.
 // 8. Makes a copy of the blob, using BeforeCopy as a CopyOption.
 // 9. Calls SignedURL using BeforeSign as a SignedURLOption for each supported
-//    signing method (i.e. GET, PUT and DELETE).
+//
+//	signing method (i.e. GET, PUT and DELETE).
 //
 // For example, an AsTest might set a driver-specific field to a custom
 // value in BeforeWrite, and then verify the custom value was returned in
@@ -93,19 +112,22 @@ type AsTest interface {
 	ErrorCheck(b *blob.Bucket, err error) error
 	// BeforeRead will be passed directly to ReaderOptions as part of reading
 	// a test blob.
-	BeforeRead(as func(interface{}) bool) error
+	BeforeRead(as func(any) bool) error
 	// BeforeWrite will be passed directly to WriterOptions as part of creating
 	// a test blob.
-	BeforeWrite(as func(interface{}) bool) error
+	BeforeWrite(as func(any) bool) error
 	// BeforeCopy will be passed directly to CopyOptions as part of copying
 	// the test blob.
-	BeforeCopy(as func(interface{}) bool) error
+	BeforeCopy(as func(any) bool) error
+	// BeforeDelete will be passed directly to DeleteOptions as part of
+	// deleting the test blob.
+	BeforeDelete(as func(any) bool) error
 	// BeforeList will be passed directly to ListOptions as part of listing the
 	// test blob.
-	BeforeList(as func(interface{}) bool) error
+	BeforeList(as func(any) bool) error
 	// BeforeSign will be passed directly to SignedURLOptions as part of
 	// generating a signed URL to the test blob.
-	BeforeSign(as func(interface{}) bool) error
+	BeforeSign(as func(any) bool) error
 	// AttributesCheck will be called after fetching the test blob's attributes.
 	// It should call attrs.As and verify the results.
 	AttributesCheck(attrs *blob.Attributes) error
@@ -115,6 +137,27 @@ type AsTest interface {
 	// ListObjectCheck will be called after calling List with the test object's
 	// name as the Prefix. It should call o.As and verify the results.
 	ListObjectCheck(o *blob.ListObject) error
+}
+
+func closeWithErrorCheck(t testing.TB, c io.Closer) {
+	t.Helper()
+	if err := c.Close(); err != nil {
+		t.Errorf("failed to close: %v", err)
+	}
+}
+
+func deleteWithErrorCheck(ctx context.Context, t testing.TB, b *blob.Bucket, key string) {
+	t.Helper()
+	if err := b.Delete(ctx, key); err != nil {
+		t.Errorf("failed to delete key %q: %v", key, err)
+	}
+}
+
+func writeWithErrorCheck(ctx context.Context, t testing.TB, b *blob.Bucket, key string, content []byte) {
+	t.Helper()
+	if err := b.WriteAll(ctx, key, content, nil); err != nil {
+		t.Errorf("failed to do cleanup write for key %q: %v", key, err)
+	}
 }
 
 type verifyAsFailsOnNil struct{}
@@ -140,35 +183,42 @@ func (verifyAsFailsOnNil) ErrorCheck(b *blob.Bucket, err error) (ret error) {
 	return nil
 }
 
-func (verifyAsFailsOnNil) BeforeRead(as func(interface{}) bool) error {
+func (verifyAsFailsOnNil) BeforeRead(as func(any) bool) error {
 	if as(nil) {
 		return errors.New("want BeforeReader's As to return false when passed nil")
 	}
 	return nil
 }
 
-func (verifyAsFailsOnNil) BeforeWrite(as func(interface{}) bool) error {
+func (verifyAsFailsOnNil) BeforeWrite(as func(any) bool) error {
 	if as(nil) {
 		return errors.New("want BeforeWrite's As to return false when passed nil")
 	}
 	return nil
 }
 
-func (verifyAsFailsOnNil) BeforeCopy(as func(interface{}) bool) error {
+func (verifyAsFailsOnNil) BeforeCopy(as func(any) bool) error {
 	if as(nil) {
 		return errors.New("want BeforeCopy's As to return false when passed nil")
 	}
 	return nil
 }
 
-func (verifyAsFailsOnNil) BeforeList(as func(interface{}) bool) error {
+func (verifyAsFailsOnNil) BeforeDelete(as func(any) bool) error {
+	if as(nil) {
+		return errors.New("want BeforeDelete's As to return false when passed nil")
+	}
+	return nil
+}
+
+func (verifyAsFailsOnNil) BeforeList(as func(any) bool) error {
 	if as(nil) {
 		return errors.New("want BeforeList's As to return false when passed nil")
 	}
 	return nil
 }
 
-func (verifyAsFailsOnNil) BeforeSign(as func(interface{}) bool) error {
+func (verifyAsFailsOnNil) BeforeSign(as func(any) bool) error {
 	if as(nil) {
 		return errors.New("want BeforeSign's As to return false when passed nil")
 	}
@@ -210,6 +260,9 @@ func RunConformanceTests(t *testing.T, newHarness HarnessMaker, asTests []AsTest
 	t.Run("TestListDelimiters", func(t *testing.T) {
 		testListDelimiters(t, newHarness)
 	})
+	t.Run("TestDirsWithCharactersBeforeDelimiter", func(t *testing.T) {
+		testDirsWithCharactersBeforeDelimiter(t, newHarness)
+	})
 	t.Run("TestRead", func(t *testing.T) {
 		testRead(t, newHarness)
 	})
@@ -224,6 +277,9 @@ func RunConformanceTests(t *testing.T, newHarness HarnessMaker, asTests []AsTest
 	})
 	t.Run("TestConcurrentWriteAndRead", func(t *testing.T) {
 		testConcurrentWriteAndRead(t, newHarness)
+	})
+	t.Run("TestUploadDownload", func(t *testing.T) {
+		testUploadDownload(t, newHarness)
 	})
 	t.Run("TestMetadata", func(t *testing.T) {
 		testMetadata(t, newHarness)
@@ -242,6 +298,9 @@ func RunConformanceTests(t *testing.T, newHarness HarnessMaker, asTests []AsTest
 	})
 	t.Run("TestSignedURL", func(t *testing.T) {
 		testSignedURL(t, newHarness)
+	})
+	t.Run("TestIfNotExist", func(t *testing.T) {
+		testIfNotExist(t, newHarness)
 	})
 	asTests = append(asTests, verifyAsFailsOnNil{})
 	t.Run("TestAs", func(t *testing.T) {
@@ -286,7 +345,7 @@ func testNonexistentBucket(t *testing.T, newHarness HarnessMaker) {
 			t.Skip()
 		}
 		b := blob.NewBucket(drv)
-		defer b.Close()
+		defer closeWithErrorCheck(t, b)
 		exists, err := b.IsAccessible(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -303,7 +362,7 @@ func testNonexistentBucket(t *testing.T, newHarness HarnessMaker) {
 			t.Fatal(err)
 		}
 		b := blob.NewBucket(drv)
-		defer b.Close()
+		defer closeWithErrorCheck(t, b)
 		exists, err := b.IsAccessible(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -404,16 +463,16 @@ func testList(t *testing.T, newHarness HarnessMaker) {
 		b := blob.NewBucket(drv)
 		iter := b.List(&blob.ListOptions{Prefix: keyPrefix})
 		found := iterToSetOfKeys(ctx, t, iter)
-		for i := 0; i < 3; i++ {
+		for i := range 3 {
 			key := keyForIndex(i)
 			if !found[key] {
 				if err := b.WriteAll(ctx, key, content, nil); err != nil {
-					b.Close()
+					closeWithErrorCheck(t, b)
 					t.Fatal(err)
 				}
 			}
 		}
-		return drv, func() { b.Close(); h.Close() }
+		return drv, func() { _ = b.Close(); h.Close() }
 	}
 
 	for _, tc := range tests {
@@ -471,14 +530,12 @@ func testList(t *testing.T, newHarness HarnessMaker) {
 
 		// Insert a key "0a" in the middle of the page we already retrieved.
 		b := blob.NewBucket(drv)
-		defer b.Close()
+		defer closeWithErrorCheck(t, b)
 		key := page.Objects[0].Key + "a"
 		if err := b.WriteAll(ctx, key, content, nil); err != nil {
 			t.Fatal(err)
 		}
-		defer func() {
-			_ = b.Delete(ctx, key)
-		}()
+		defer deleteWithErrorCheck(ctx, t, b, key)
 
 		// Fetch the next page. It should not include 0, 0a, or 1, and it should
 		// include 2.
@@ -517,14 +574,12 @@ func testList(t *testing.T, newHarness HarnessMaker) {
 
 		// Delete key "1".
 		b := blob.NewBucket(drv)
-		defer b.Close()
+		defer closeWithErrorCheck(t, b)
 		key := page.Objects[1].Key
 		if err := b.Delete(ctx, key); err != nil {
 			t.Fatal(err)
 		}
-		defer func() {
-			_ = b.WriteAll(ctx, key, content, nil)
-		}()
+		defer writeWithErrorCheck(ctx, t, b, key, content)
 
 		// Fetch the next page. It should not include 0 or 1, and it should
 		// include 2.
@@ -578,12 +633,12 @@ func testListWeirdKeys(t *testing.T, newHarness HarnessMaker) {
 			key := keyPrefix + k
 			if !found[key] {
 				if err := b.WriteAll(ctx, key, content, nil); err != nil {
-					b.Close()
+					_ = b.Close()
 					t.Fatal(err)
 				}
 			}
 		}
-		return b, func() { b.Close(); h.Close() }
+		return b, func() { _ = b.Close(); h.Close() }
 	}
 
 	b, done := init(t)
@@ -860,7 +915,7 @@ func testListDelimiters(t *testing.T, newHarness HarnessMaker) {
 	// no guarantee that after we create them they will be immediately returned
 	// from List. The very first time the test is run against a Bucket, it may be
 	// flaky due to this race.
-	init := func(t *testing.T, delim string) (driver.Bucket, *blob.Bucket, func()) {
+	init := func(t *testing.T, delim string) (driver.Bucket, *blob.Bucket, bool, func()) {
 		h, err := newHarness(ctx, t)
 		if err != nil {
 			t.Fatal(err)
@@ -879,17 +934,17 @@ func testListDelimiters(t *testing.T, newHarness HarnessMaker) {
 			key := prefix + strings.Join(keyParts, delim)
 			if !found[key] {
 				if err := b.WriteAll(ctx, key, content, nil); err != nil {
-					b.Close()
+					_ = b.Close()
 					t.Fatal(err)
 				}
 			}
 		}
-		return drv, b, func() { b.Close(); h.Close() }
+		return drv, b, h.SupportsNonSlashDelimiters(), func() { _ = b.Close(); h.Close() }
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			drv, b, done := init(t, tc.delim)
+			drv, b, supportsNonSlash, done := init(t, tc.delim)
 			defer done()
 
 			// Fetch without using delimiter.
@@ -902,6 +957,9 @@ func testListDelimiters(t *testing.T, newHarness HarnessMaker) {
 			}
 
 			// Fetch using delimiter, recursively.
+			if !supportsNonSlash {
+				return
+			}
 			got, err = doList(ctx, b, keyPrefix+tc.delim, tc.delim, true)
 			if err != nil {
 				t.Fatal(err)
@@ -947,9 +1005,7 @@ func testListDelimiters(t *testing.T, newHarness HarnessMaker) {
 				t.Fatal(err)
 			}
 			// Attempt to restore dir2/e.txt at the end of the test for the next run.
-			defer func() {
-				_ = b.WriteAll(ctx, key, content, nil)
-			}()
+			defer writeWithErrorCheck(ctx, t, b, key, content)
 
 			got, err = doList(ctx, b, keyPrefix+tc.delim, tc.delim, false)
 			if err != nil {
@@ -959,6 +1015,86 @@ func testListDelimiters(t *testing.T, newHarness HarnessMaker) {
 				t.Errorf("after delete, got\n%v\nwant\n%v\ndiff\n%s", got, tc.wantAfterDel, diff)
 			}
 		})
+	}
+}
+
+// testDirsWithCharactersBeforeDelimiter tests a case where there's
+// a directory on a pagination boundary that ends with a character that's
+// less than the delimiter.
+// See https://github.com/google/go-cloud/issues/3089.
+func testDirsWithCharactersBeforeDelimiter(t *testing.T, newHarness HarnessMaker) {
+	const keyPrefix = "blob-for-dirs-with-chars-before-delimiter/"
+	content := []byte("hello")
+
+	// The set of files to use for these tests.
+	keys := []string{
+		"testFile1",
+		"t/t/t",
+		"t-/t.",
+		"dir1/testFile1dir1",
+		"dir2/testFile1dir2",
+		"d",
+	}
+
+	// Note that "t-/" is before "t/". The delimiter is included in the
+	// alphabetical ordering.
+	want := []string{"d", "dir1/", "dir2/", "t-/", "t/", "testFile1"}
+
+	// Create blobs.
+	// We only create the blobs once, for efficiency and because there's
+	// no guarantee that after we create them they will be immediately returned
+	// from List. The very first time the test is run against a Bucket, it may be
+	// flaky due to this race.
+	ctx := context.Background()
+	h, err := newHarness(ctx, t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	drv, err := h.MakeDriver(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := blob.NewBucket(drv)
+
+	// See if the blobs are already there.
+	iter := b.List(&blob.ListOptions{Prefix: keyPrefix})
+	found := iterToSetOfKeys(ctx, t, iter)
+	for _, key := range keys {
+		key = keyPrefix + key
+		if !found[key] {
+			if err := b.WriteAll(ctx, key, content, nil); err != nil {
+				_ = b.Close()
+				t.Fatal(err)
+			}
+		}
+	}
+	defer closeWithErrorCheck(t, b)
+	defer h.Close()
+
+	opts := &blob.ListOptions{
+		Prefix:    keyPrefix,
+		Delimiter: "/",
+	}
+	// All page sizes should return the same end result.
+	for pageSize := 10; pageSize != 0; pageSize-- {
+		var got []string
+		objs, token, err := b.ListPage(ctx, blob.FirstPageToken, pageSize, opts)
+		for {
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, o := range objs {
+				key := strings.TrimPrefix(o.Key, keyPrefix)
+				got = append(got, key)
+			}
+			if token == nil {
+				break
+			}
+			objs, token, err = b.ListPage(ctx, token, pageSize, opts)
+		}
+		if !reflect.DeepEqual(want, got) {
+			t.Fatalf("For page size %d, got \n%v\nwant\n%v", pageSize, got, want)
+		}
 	}
 }
 
@@ -1059,15 +1195,15 @@ func testRead(t *testing.T, newHarness HarnessMaker) {
 		}
 		b := blob.NewBucket(drv)
 		if skipCreate {
-			return b, func() { b.Close(); h.Close() }
+			return b, func() { _ = b.Close(); h.Close() }
 		}
 		if err := b.WriteAll(ctx, key, content, nil); err != nil {
-			b.Close()
+			_ = b.Close()
 			t.Fatal(err)
 		}
 		return b, func() {
-			_ = b.Delete(ctx, key)
-			b.Close()
+			deleteWithErrorCheck(ctx, t, b, key)
+			closeWithErrorCheck(t, b)
 			h.Close()
 		}
 	}
@@ -1084,7 +1220,7 @@ func testRead(t *testing.T, newHarness HarnessMaker) {
 			if err != nil {
 				return
 			}
-			defer r.Close()
+			defer closeWithErrorCheck(t, r)
 			// Make the buffer bigger than needed to make sure we actually only read
 			// the expected number of bytes.
 			got := make([]byte, tc.wantReadSize+10)
@@ -1104,6 +1240,18 @@ func testRead(t *testing.T, newHarness HarnessMaker) {
 			}
 			if r.ModTime().IsZero() {
 				t.Errorf("got zero mod time, want non-zero")
+			}
+			// For tests that successfully read, recreate the io.Reader and
+			// test it with iotest.TestReader.
+			r, err = b.NewRangeReader(ctx, tc.key, tc.offset, tc.length, nil)
+			if err != nil {
+				t.Errorf("failed to recreate Reader: %v", err)
+				return
+			}
+			defer closeWithErrorCheck(t, r)
+			if err = iotest.TestReader(r, tc.want); err != nil {
+				t.Errorf("iotest.TestReader failed: %v", err)
+				return
 			}
 		})
 	}
@@ -1143,12 +1291,12 @@ func testAttributes(t *testing.T, newHarness HarnessMaker) {
 			ContentLanguage:    contentLanguage,
 		}
 		if err := b.WriteAll(ctx, key, content, opts); err != nil {
-			b.Close()
+			_ = b.Close()
 			t.Fatal(err)
 		}
 		return b, func() {
-			_ = b.Delete(ctx, key)
-			b.Close()
+			deleteWithErrorCheck(ctx, t, b, key)
+			closeWithErrorCheck(t, b)
 			h.Close()
 		}
 	}
@@ -1224,7 +1372,7 @@ func testAttributes(t *testing.T, newHarness HarnessMaker) {
 	if !strings.HasSuffix(a.ETag, "\"") {
 		t.Errorf("ETag should end with \" (got %s)", a.ETag)
 	}
-	r.Close()
+	closeWithErrorCheck(t, r)
 
 	// Modify and re-fetch attributes.
 	if err := b.WriteAll(ctx, key, content, nil); err != nil {
@@ -1241,10 +1389,12 @@ func testAttributes(t *testing.T, newHarness HarnessMaker) {
 }
 
 // loadTestData loads test data, inlined using go-bindata.
-func loadTestData(t testing.TB, name string) []byte {
+func loadTestData(tb testing.TB, name string) []byte {
+	tb.Helper()
+
 	data, err := Asset(name)
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 	return data
 }
@@ -1260,16 +1410,17 @@ func testWrite(t *testing.T, newHarness HarnessMaker) {
 	helloWorldMD5 := md5.Sum(helloWorld)
 
 	tests := []struct {
-		name            string
-		key             string
-		exists          bool
-		content         []byte
-		contentType     string
-		contentMD5      []byte
-		firstChunk      int
-		wantContentType string
-		wantErr         bool
-		wantReadErr     bool // if wantErr is true, and Read after err should fail with something other than NotExists
+		name                        string
+		key                         string
+		exists                      bool
+		content                     []byte
+		contentType                 string
+		disableContentTypeDetection bool
+		contentMD5                  []byte
+		firstChunk                  int
+		wantContentType             *regexp.Regexp
+		wantErr                     bool
+		wantReadErr                 bool // if wantErr is true, and Read after err should fail with something other than NotExists
 	}{
 		{
 			name:        "write to empty key fails",
@@ -1294,14 +1445,24 @@ func testWrite(t *testing.T, newHarness HarnessMaker) {
 			name:            "ContentType is discovered if not provided",
 			key:             key,
 			content:         mediumHTML,
-			wantContentType: "text/html",
+			wantContentType: regexp.MustCompile("text/html"),
+		},
+		{
+			name:                        "ContentType is left empty if not provided and DisableContentTypeDetection is true",
+			key:                         key,
+			content:                     mediumHTML,
+			disableContentTypeDetection: true,
+			// Sadly we can't really verify this; even though we write the ContentType
+			// empty, different providers return different values when we read it,
+			// from "application/octet-stream" to their own sniffing.
+			// wantContentType:             regexp.MustCompile("^$"),
 		},
 		{
 			name:            "write with explicit ContentType overrides discovery",
 			key:             key,
 			content:         mediumHTML,
 			contentType:     "application/json",
-			wantContentType: "application/json",
+			wantContentType: regexp.MustCompile("application/json"),
 		},
 		{
 			name:       "Content md5 match",
@@ -1325,23 +1486,23 @@ func testWrite(t *testing.T, newHarness HarnessMaker) {
 			wantErr:    true,
 		},
 		{
-			name:            "a small text file",
+			name:            "a small text file gets a ContentType",
 			key:             key,
 			content:         smallText,
-			wantContentType: "text/html",
+			wantContentType: regexp.MustCompile("text/plain.*"),
 		},
 		{
-			name:            "a large jpg file",
+			name:            "a large jpg file gets a ContentType",
 			key:             key,
 			content:         largeJpg,
-			wantContentType: "image/jpg",
+			wantContentType: regexp.MustCompile("image/jpeg"),
 		},
 		{
-			name:            "a large jpg file written in two chunks",
+			name:            "a large jpg file written in two chunks gets a ContentType",
 			key:             key,
 			firstChunk:      10,
 			content:         largeJpg,
-			wantContentType: "image/jpg",
+			wantContentType: regexp.MustCompile("image/jpeg"),
 		},
 		// TODO(issue #304): Fails for GCS.
 		/*
@@ -1368,22 +1529,21 @@ func testWrite(t *testing.T, newHarness HarnessMaker) {
 				t.Fatal(err)
 			}
 			b := blob.NewBucket(drv)
-			defer b.Close()
+			defer closeWithErrorCheck(t, b)
 
 			// If the test wants the blob to already exist, write it.
 			if tc.exists {
 				if err := b.WriteAll(ctx, key, []byte(existingContent), nil); err != nil {
 					t.Fatal(err)
 				}
-				defer func() {
-					_ = b.Delete(ctx, key)
-				}()
+				defer deleteWithErrorCheck(ctx, t, b, key)
 			}
 
 			// Write the content.
 			opts := &blob.WriterOptions{
-				ContentType: tc.contentType,
-				ContentMD5:  tc.contentMD5[:],
+				ContentType:                 tc.contentType,
+				DisableContentTypeDetection: tc.disableContentTypeDetection,
+				ContentMD5:                  tc.contentMD5[:],
 			}
 			w, err := b.NewWriter(ctx, tc.key, opts)
 			if err == nil {
@@ -1426,7 +1586,7 @@ func testWrite(t *testing.T, newHarness HarnessMaker) {
 				}
 				return
 			}
-			defer func() { _ = b.Delete(ctx, tc.key) }()
+			defer deleteWithErrorCheck(ctx, t, b, tc.key)
 
 			// Read it back.
 			buf, err := b.ReadAll(ctx, tc.key)
@@ -1438,6 +1598,17 @@ func testWrite(t *testing.T, newHarness HarnessMaker) {
 					t.Errorf("read didn't match write; got \n%s\n want \n%s", string(buf), string(tc.content))
 				} else {
 					t.Error("read didn't match write, content too large to display")
+				}
+			}
+
+			// Verify the ContentType.
+			if tc.wantContentType != nil {
+				attrs, err := b.Attributes(ctx, tc.key)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !tc.wantContentType.MatchString(attrs.ContentType) {
+					t.Errorf("got ContentType %q, want one matching %v", attrs.ContentType, tc.wantContentType)
 				}
 			}
 		})
@@ -1488,7 +1659,7 @@ func testCanceledWrite(t *testing.T, newHarness HarnessMaker) {
 				t.Fatal(err)
 			}
 			b := blob.NewBucket(drv)
-			defer b.Close()
+			defer closeWithErrorCheck(t, b)
 
 			opts := &blob.WriterOptions{
 				ContentType: test.contentType,
@@ -1498,9 +1669,7 @@ func testCanceledWrite(t *testing.T, newHarness HarnessMaker) {
 				if err := b.WriteAll(ctx, key, content, opts); err != nil {
 					t.Fatal(err)
 				}
-				defer func() {
-					_ = b.Delete(ctx, key)
-				}()
+				defer deleteWithErrorCheck(ctx, t, b, key)
 			}
 
 			// Create a writer with the context that we're going
@@ -1654,7 +1823,7 @@ func testMetadata(t *testing.T, newHarness HarnessMaker) {
 				t.Fatal(err)
 			}
 			b := blob.NewBucket(drv)
-			defer b.Close()
+			defer closeWithErrorCheck(t, b)
 			opts := &blob.WriterOptions{
 				Metadata:    tc.metadata,
 				ContentType: tc.contentType,
@@ -1666,9 +1835,7 @@ func testMetadata(t *testing.T, newHarness HarnessMaker) {
 			if err != nil {
 				return
 			}
-			defer func() {
-				_ = b.Delete(ctx, key)
-			}()
+			defer deleteWithErrorCheck(ctx, t, b, key)
 			a, err := b.Attributes(ctx, key)
 			if err != nil {
 				t.Fatal(err)
@@ -1701,17 +1868,18 @@ func testMD5(t *testing.T, newHarness HarnessMaker) {
 		t.Fatal(err)
 	}
 	b := blob.NewBucket(drv)
-	defer b.Close()
+	defer closeWithErrorCheck(t, b)
 
-	// Write the two blobs.
+	// Write the two blobs, one using WriteAll and one using Upload
+	// as those may go through different driver paths.
 	if err := b.WriteAll(ctx, aKey, aContent, nil); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = b.Delete(ctx, aKey) }()
-	if err := b.WriteAll(ctx, bKey, bContent, nil); err != nil {
+	defer deleteWithErrorCheck(ctx, t, b, aKey)
+	if err := b.Upload(ctx, bKey, bytes.NewReader(bContent), &blob.WriterOptions{ContentType: "text"}); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = b.Delete(ctx, bKey) }()
+	defer deleteWithErrorCheck(ctx, t, b, bKey)
 
 	// Check the MD5 we get through Attributes. Note that it's always legal to
 	// return a nil MD5.
@@ -1768,7 +1936,7 @@ func testCopy(t *testing.T, newHarness HarnessMaker) {
 		contentEncoding    = "identity"
 		contentLanguage    = "en"
 	)
-	var contents = []byte("Hello World")
+	contents := []byte("Hello World")
 
 	ctx := context.Background()
 	t.Run("NonExistentSourceFails", func(t *testing.T) {
@@ -1777,12 +1945,16 @@ func testCopy(t *testing.T, newHarness HarnessMaker) {
 			t.Fatal(err)
 		}
 		defer h.Close()
+		if !h.SupportsCopy() {
+			return
+		}
+
 		drv, err := h.MakeDriver(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
 		b := blob.NewBucket(drv)
-		defer b.Close()
+		defer closeWithErrorCheck(t, b)
 
 		err = b.Copy(ctx, dstKey, "does-not-exist", nil)
 		if err == nil {
@@ -1800,12 +1972,16 @@ func testCopy(t *testing.T, newHarness HarnessMaker) {
 			t.Fatal(err)
 		}
 		defer h.Close()
+		if !h.SupportsCopy() {
+			return
+		}
+
 		drv, err := h.MakeDriver(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
 		b := blob.NewBucket(drv)
-		defer b.Close()
+		defer closeWithErrorCheck(t, b)
 
 		// Create the source blob.
 		wopts := &blob.WriterOptions{
@@ -1884,6 +2060,72 @@ func testCopy(t *testing.T, newHarness HarnessMaker) {
 			t.Errorf("got %v want %v diff %s", gotAttr, wantAttr, diff)
 		}
 	})
+
+	t.Run("DoesNotAliasAttributes", func(t *testing.T) {
+		// Verifies that the copy does not share mutable state with the
+		// source: mutating the attributes of one must not change the other.
+		h, err := newHarness(ctx, t)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer h.Close()
+		if !h.SupportsCopy() {
+			return
+		}
+
+		drv, err := h.MakeDriver(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b := blob.NewBucket(drv)
+		defer closeWithErrorCheck(t, b)
+
+		// Create the source blob with some metadata.
+		wopts := &blob.WriterOptions{
+			ContentType: contentType,
+			Metadata:    map[string]string{"foo": "bar"},
+		}
+		if err := b.WriteAll(ctx, srcKey, contents, wopts); err != nil {
+			t.Fatal(err)
+		}
+
+		// Copy the source to the destination.
+		if err := b.Copy(ctx, dstKey, srcKey, nil); err != nil {
+			t.Fatal(err)
+		}
+
+		// Read the copy's attributes before mutating the source's.
+		before, err := b.Attributes(ctx, dstKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Mutate the source's attributes at the driver level. For drivers
+		// that keep attributes in memory (e.g., memblob), this changes the
+		// stored attributes for the source key. The metadata map may be nil
+		// for configurations that don't store metadata (e.g., fileblob with
+		// Options.Metadata set to MetadataDontWrite).
+		srcAttrs, err := drv.Attributes(ctx, srcKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		srcAttrs.ContentType = "text/mutated"
+		if srcAttrs.Metadata != nil {
+			srcAttrs.Metadata["foo"] = "mutated"
+		}
+
+		// The copy must not be affected.
+		after, err := b.Attributes(ctx, dstKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := after.ContentType, before.ContentType; got != want {
+			t.Errorf("after mutating source attributes, copy's ContentType = %q, want %q", got, want)
+		}
+		if diff := cmp.Diff(after.Metadata, before.Metadata); diff != "" {
+			t.Errorf("after mutating source metadata, copy's metadata changed: %s", diff)
+		}
+	})
 }
 
 // testDelete tests the functionality of Delete.
@@ -1902,7 +2144,7 @@ func testDelete(t *testing.T, newHarness HarnessMaker) {
 			t.Fatal(err)
 		}
 		b := blob.NewBucket(drv)
-		defer b.Close()
+		defer closeWithErrorCheck(t, b)
 
 		err = b.Delete(ctx, "does-not-exist")
 		if err == nil {
@@ -1925,7 +2167,7 @@ func testDelete(t *testing.T, newHarness HarnessMaker) {
 			t.Fatal(err)
 		}
 		b := blob.NewBucket(drv)
-		defer b.Close()
+		defer closeWithErrorCheck(t, b)
 
 		// Create the blob.
 		if err := b.WriteAll(ctx, key, []byte("Hello world"), nil); err != nil {
@@ -1954,6 +2196,54 @@ func testDelete(t *testing.T, newHarness HarnessMaker) {
 			t.Errorf("got %v want error to include missing key", err)
 		}
 	})
+
+	t.Run("BeforeDelete", func(t *testing.T) {
+		h, err := newHarness(ctx, t)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer h.Close()
+		drv, err := h.MakeDriver(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b := blob.NewBucket(drv)
+		defer closeWithErrorCheck(t, b)
+
+		if err := b.WriteAll(ctx, key, []byte("Hello world"), nil); err != nil {
+			t.Fatal(err)
+		}
+
+		// BeforeDelete must be called exactly once for a successful delete.
+		calls := 0
+		if err := b.DeleteWithOptions(ctx, key, &blob.DeleteOptions{
+			BeforeDelete: func(func(any) bool) error { calls++; return nil },
+		}); err != nil {
+			t.Errorf("DeleteWithOptions got unexpected error: %v", err)
+		}
+		if calls != 1 {
+			t.Errorf("BeforeDelete called %d times, want 1", calls)
+		}
+
+		// An error returned from BeforeDelete aborts the delete and propagates.
+		if err := b.WriteAll(ctx, key, []byte("Hello world"), nil); err != nil {
+			t.Fatal(err)
+		}
+		wantErr := errors.New("BeforeDelete failed")
+		err = b.DeleteWithOptions(ctx, key, &blob.DeleteOptions{
+			BeforeDelete: func(func(any) bool) error { return wantErr },
+		})
+		if !errors.Is(err, wantErr) {
+			t.Errorf("DeleteWithOptions with failing BeforeDelete got %v, want %v", err, wantErr)
+		}
+		// The blob must still exist since the delete was aborted.
+		if exists, err := b.Exists(ctx, key); err != nil {
+			t.Errorf("Exists after aborted delete got error: %v", err)
+		} else if !exists {
+			t.Errorf("blob should still exist after an aborted delete")
+		}
+		deleteWithErrorCheck(ctx, t, b, key)
+	})
 }
 
 // testConcurrentWriteAndRead tests that concurrent writing to multiple blob
@@ -1970,7 +2260,7 @@ func testConcurrentWriteAndRead(t *testing.T, newHarness HarnessMaker) {
 		t.Fatal(err)
 	}
 	b := blob.NewBucket(drv)
-	defer b.Close()
+	defer closeWithErrorCheck(t, b)
 
 	// Prepare data. Each of the numKeys blobs has dataSize bytes, with each byte
 	// set to the numeric key index. For example, the blob at "key0" consists of
@@ -1978,9 +2268,9 @@ func testConcurrentWriteAndRead(t *testing.T, newHarness HarnessMaker) {
 	const numKeys = 20
 	const dataSize = 4 * 1024
 	keyData := make(map[int][]byte)
-	for k := 0; k < numKeys; k++ {
+	for k := range numKeys {
 		data := make([]byte, dataSize)
-		for i := 0; i < dataSize; i++ {
+		for i := range dataSize {
 			data[i] = byte(k)
 		}
 		keyData[k] = data
@@ -1992,34 +2282,119 @@ func testConcurrentWriteAndRead(t *testing.T, newHarness HarnessMaker) {
 
 	var wg sync.WaitGroup
 
+	errs := make(chan error, numKeys)
+
 	// Write all blobs concurrently.
-	for k := 0; k < numKeys; k++ {
+	for k := range numKeys {
 		wg.Add(1)
 		go func(key int) {
 			if err := b.WriteAll(ctx, blobName(key), keyData[key], nil); err != nil {
-				t.Fatal(err)
+				errs <- fmt.Errorf("WriteAll key=%v: %w", key, err)
 			}
 			wg.Done()
 		}(k)
-		defer b.Delete(ctx, blobName(k))
+		defer deleteWithErrorCheck(ctx, t, b, blobName(k))
 	}
 	wg.Wait()
 
+	close(errs)
+
+	for err := range errs {
+		t.Fatalf("got error from concurrent blob write: %v", err)
+	}
+
+	errs = make(chan error, numKeys)
+
 	// Read all blobs concurrently and verify that they contain the expected data.
-	for k := 0; k < numKeys; k++ {
+	for k := range numKeys {
 		wg.Add(1)
 		go func(key int) {
 			buf, err := b.ReadAll(ctx, blobName(key))
 			if err != nil {
-				t.Fatal(err)
-			}
-			if !bytes.Equal(buf, keyData[key]) {
-				t.Errorf("read data mismatch for key %d", key)
+				errs <- err
+			} else if !bytes.Equal(buf, keyData[key]) {
+				errs <- fmt.Errorf("read data mismatch for key %d", key)
 			}
 			wg.Done()
 		}(k)
 	}
 	wg.Wait()
+
+	close(errs)
+
+	for err := range errs {
+		t.Fatalf("got error from concurrent blob write: %v", err)
+	}
+}
+
+// testUploadDownload tests that Upload and Download work. For many drivers,
+// these are implemented in the concrete type, but drivers that implement Reader.Download
+// and/or Writer.Upload will have those called directly.
+func testUploadDownload(t *testing.T, newHarness HarnessMaker) {
+	const key = "blob-for-upload-download"
+	const contents = "up and down"
+	contentsMD5 := md5.Sum([]byte(contents))
+
+	ctx := context.Background()
+	h, err := newHarness(ctx, t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	drv, err := h.MakeDriver(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := blob.NewBucket(drv)
+	defer closeWithErrorCheck(t, b)
+
+	// Write a blob using Upload.
+	if err := b.Upload(ctx, key, strings.NewReader(contents), &blob.WriterOptions{ContentType: "text"}); err != nil {
+		t.Fatal(err)
+	}
+	defer deleteWithErrorCheck(ctx, t, b, key)
+
+	// Read the blob using Download.
+	var bb bytes.Buffer
+	err = b.Download(ctx, key, &bb, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bb.String() != contents {
+		t.Errorf("Download: read data mismatch for key %s", key)
+	}
+
+	if !h.SkipDownloadAt() {
+		// Read the blob into an io.WriterAt (enables DownloadAt optimization for some drivers).
+		tmpFile, err := os.CreateTemp("", "io-writer-at")
+		if err != nil {
+			t.Fatalf("failed to create temp file: %v", err)
+		}
+		defer func() {
+			if err := os.Remove(tmpFile.Name()); err != nil {
+				t.Errorf("failed to remove temp file: %v", err)
+			}
+		}()
+		defer closeWithErrorCheck(t, tmpFile)
+
+		err = b.Download(ctx, key, tmpFile, &blob.ReaderOptions{AllowParallelDownload: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fileContents, err := os.ReadFile(tmpFile.Name())
+		if err != nil {
+			log.Fatalf("Failed to read from Download destination file: %v", err)
+		}
+
+		if string(fileContents) != contents {
+			t.Errorf("DownloadAt: read data mismatch for key %s", key)
+		}
+	}
+
+	// Write the same blob using Upload and ContentMD5 checking (this disables the Upload optimization).
+	if err := b.Upload(ctx, key, strings.NewReader(contents), &blob.WriterOptions{ContentMD5: contentsMD5[:], ContentType: "text"}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // testKeys tests a variety of weird keys.
@@ -2039,7 +2414,7 @@ func testKeys(t *testing.T, newHarness HarnessMaker) {
 			t.Fatal(err)
 		}
 		b := blob.NewBucket(drv)
-		defer b.Close()
+		defer closeWithErrorCheck(t, b)
 
 		// Write the blob.
 		key := keyPrefix + escape.NonUTF8String
@@ -2052,49 +2427,43 @@ func testKeys(t *testing.T, newHarness HarnessMaker) {
 		t.Run(description, func(t *testing.T) {
 			h, err := newHarness(ctx, t)
 			if err != nil {
-				t.Fatal(err)
+				t.Fatalf("Failed to create harness: %v", err)
 			}
 			defer h.Close()
 			drv, err := h.MakeDriver(ctx)
 			if err != nil {
-				t.Fatal(err)
+				t.Fatalf("Failed to make driver: %v", err)
 			}
 			b := blob.NewBucket(drv)
-			defer b.Close()
+			defer closeWithErrorCheck(t, b)
 
 			// Write the blob.
 			key = keyPrefix + key
 			if err := b.WriteAll(ctx, key, content, nil); err != nil {
-				t.Fatal(err)
+				t.Fatalf("Failed to write blob at key %q: %v", key, err)
 			}
-
-			defer func() {
-				err := b.Delete(ctx, key)
-				if err != nil {
-					t.Error(err)
-				}
-			}()
+			defer deleteWithErrorCheck(ctx, t, b, key)
 
 			// Verify read works.
 			got, err := b.ReadAll(ctx, key)
 			if err != nil {
-				t.Fatal(err)
+				t.Fatalf("Failed to read blob at key %q: %v", key, err)
 			}
 			if !cmp.Equal(got, content) {
-				t.Errorf("got %q want %q", string(got), string(content))
+				t.Errorf("When reading blob, got %q want %q", string(got), string(content))
 			}
 
 			// Verify Attributes works.
 			_, err = b.Attributes(ctx, key)
 			if err != nil {
-				t.Error(err)
+				t.Errorf("Failed to get attributes for key %q: %v", key, err)
 			}
 
 			// Verify SignedURL works.
 			url, err := b.SignedURL(ctx, key, nil)
 			if gcerrors.Code(err) != gcerrors.Unimplemented {
 				if err != nil {
-					t.Error(err)
+					t.Errorf("Failed to get SignedURL for key %q: %v", key, err)
 				}
 				client := h.HTTPClient()
 				if client == nil {
@@ -2102,19 +2471,36 @@ func testKeys(t *testing.T, newHarness HarnessMaker) {
 				}
 				resp, err := client.Get(url)
 				if err != nil {
-					t.Fatal(err)
+					t.Fatalf("GET using SignedURL for key %q failed: %v", key, err)
 				}
-				defer resp.Body.Close()
+				defer closeWithErrorCheck(t, resp.Body)
 				if resp.StatusCode != 200 {
-					t.Errorf("got status code %d, want 200", resp.StatusCode)
+					t.Fatalf("GET using SignedURL for key %q got status code %d, want 200", key, resp.StatusCode)
 				}
-				got, err := ioutil.ReadAll(resp.Body)
+				got, err := io.ReadAll(resp.Body)
 				if err != nil {
-					t.Fatal(err)
+					t.Fatalf("GET using SignedURL for key %q got 200, but failed to ready body: %v", key, err)
 				}
 				if !bytes.Equal(got, content) {
-					t.Errorf("got body %q, want %q", string(got), string(content))
+					t.Errorf("GET using SignedURL for key %q got body %q, want %q", key, string(got), string(content))
 				}
+			}
+
+			// Copy the blob.
+			if !h.SupportsCopy() {
+				return
+			}
+			copyToKey := key + "-copy"
+			if err := b.Copy(ctx, copyToKey, key, nil); err != nil {
+				t.Fatal(err)
+			}
+			defer deleteWithErrorCheck(ctx, t, b, copyToKey)
+			got, err = b.ReadAll(ctx, copyToKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !cmp.Equal(got, content) {
+				t.Errorf("copied got %q want %q", string(got), string(content))
 			}
 		})
 	}
@@ -2138,7 +2524,7 @@ func testSignedURL(t *testing.T, newHarness HarnessMaker) {
 		t.Fatal(err)
 	}
 	b := blob.NewBucket(drv)
-	defer b.Close()
+	defer closeWithErrorCheck(t, b)
 
 	// Verify that a negative Expiry gives an error. This is enforced in the
 	// portable type, so works regardless of driver support.
@@ -2210,7 +2596,9 @@ func testSignedURL(t *testing.T, newHarness HarnessMaker) {
 
 	// Generate a signed URL for DELETE.
 	deleteURL, err := b.SignedURL(ctx, key, &blob.SignedURLOptions{Method: http.MethodDelete})
-	if err != nil {
+	if gcerrors.Code(err) == gcerrors.Unimplemented {
+		t.Log("DELETE URLs not supported, skipping")
+	} else if err != nil {
 		t.Fatal(err)
 	} else if deleteURL == "" {
 		t.Fatal("got empty DELETE url")
@@ -2231,20 +2619,24 @@ func testSignedURL(t *testing.T, newHarness HarnessMaker) {
 	}
 	tests := []signedURLTest{
 		{"getURL", getURL, "", false},
-		{"deleteURL", deleteURL, "", false},
+	}
+	if deleteURL != "" {
+		tests = append(tests, signedURLTest{"deleteURL", deleteURL, "", false})
 	}
 	if putURLWithContentType != "" {
+		// Allowed content type should work.
+		// Different or empty content type should fail.
 		tests = append(tests, signedURLTest{"putURLWithContentType", putURLWithContentType, allowedContentType, true})
 		tests = append(tests, signedURLTest{"putURLWithContentType", putURLWithContentType, differentContentType, false})
 		tests = append(tests, signedURLTest{"putURLWithContentType", putURLWithContentType, "", false})
 	}
-	/*
-	 */
 	if putURLEnforcedAbsentContentType != "" {
+		// Empty content type should work, non-empty should fail.
 		tests = append(tests, signedURLTest{"putURLEnforcedAbsentContentType", putURLEnforcedAbsentContentType, "", true})
 		tests = append(tests, signedURLTest{"putURLEnforcedAbsentContentType", putURLEnforcedAbsentContentType, differentContentType, false})
 	}
 	if putURLWithoutContentType != "" {
+		// Empty content type should work.
 		tests = append(tests, signedURLTest{"putURLWithoutContentType", putURLWithoutContentType, "", true})
 		// From the SignedURLOptions docstring:
 		// If EnforceAbsentContentType is false and ContentType is the empty string,
@@ -2263,38 +2655,38 @@ func testSignedURL(t *testing.T, newHarness HarnessMaker) {
 		if resp, err := client.Do(req); err != nil {
 			t.Fatalf("PUT to %q with ContentType %q failed: %v", test.urlDescription, test.contentType, err)
 		} else {
-			defer resp.Body.Close()
+			defer closeWithErrorCheck(t, resp.Body)
 			success := resp.StatusCode >= 200 && resp.StatusCode < 300
 			if success != test.wantSuccess {
 				t.Errorf("PUT to %q with ContentType %q got status code %d, wanted 2xx? %v", test.urlDescription, test.contentType, resp.StatusCode, test.wantSuccess)
-				gotBody, _ := ioutil.ReadAll(resp.Body)
-				t.Errorf(string(gotBody))
+				gotBody, _ := io.ReadAll(resp.Body)
+				t.Error(string(gotBody))
 			}
 		}
 	}
 
 	// GET it. Try with all URLs, only getURL should work.
-	for _, test := range []struct {
-		urlDescription string
-		url            string
-		wantSuccess    bool
-	}{
-		{"deleteURL", deleteURL, false},
-		{"putURLWithoutContentType", putURLWithoutContentType, false},
-		{"getURLNoParams", getURLNoParams, false},
-		{"getURL", getURL, true},
-	} {
+	tests = nil
+	if deleteURL != "" {
+		tests = append(tests, signedURLTest{"deleteURL", deleteURL, "", false})
+	}
+	tests = append(tests, []signedURLTest{
+		{"putURLWithoutContentType", putURLWithoutContentType, "", false},
+		{"getURLNoParams", getURLNoParams, "", false},
+		{"getURL", getURL, "", true},
+	}...)
+	for _, test := range tests {
 		if resp, err := client.Get(test.url); err != nil {
 			t.Fatalf("GET with %s URL failed: %v", test.urlDescription, err)
 		} else {
-			defer resp.Body.Close()
+			defer closeWithErrorCheck(t, resp.Body)
 			success := resp.StatusCode >= 200 && resp.StatusCode < 300
 			if success != test.wantSuccess {
 				t.Errorf("GET to %q got status code %d, want 2xx? %v", test.urlDescription, resp.StatusCode, test.wantSuccess)
-				gotBody, _ := ioutil.ReadAll(resp.Body)
-				t.Errorf(string(gotBody))
+				gotBody, _ := io.ReadAll(resp.Body)
+				t.Error(string(gotBody))
 			} else if success {
-				gotBody, err := ioutil.ReadAll(resp.Body)
+				gotBody, err := io.ReadAll(resp.Body)
 				if err != nil {
 					t.Errorf("GET to %q failed to read response body: %v", test.urlDescription, err)
 				} else if gotBodyStr := string(gotBody); gotBodyStr != contents {
@@ -2305,15 +2697,14 @@ func testSignedURL(t *testing.T, newHarness HarnessMaker) {
 	}
 
 	// DELETE it. Try with all URLs, only deleteURL should work.
-	for _, test := range []struct {
-		urlDescription string
-		url            string
-		wantSuccess    bool
-	}{
-		{"getURL", getURL, false},
-		{"putURLWithoutContentType", putURLWithoutContentType, false},
-		{"deleteURL", deleteURL, true},
-	} {
+	tests = []signedURLTest{
+		{"getURL", getURL, "", false},
+		{"putURLWithoutContentType", putURLWithoutContentType, "", false},
+	}
+	if deleteURL != "" {
+		tests = append(tests, signedURLTest{"deleteURL", deleteURL, "", true})
+	}
+	for _, test := range tests {
 		req, err := http.NewRequest(http.MethodDelete, test.url, nil)
 		if err != nil {
 			t.Fatalf("failed to create DELETE HTTP request using %q: %v", test.urlDescription, err)
@@ -2321,25 +2712,27 @@ func testSignedURL(t *testing.T, newHarness HarnessMaker) {
 		if resp, err := client.Do(req); err != nil {
 			t.Fatalf("DELETE to %q failed: %v", test.urlDescription, err)
 		} else {
-			defer resp.Body.Close()
+			defer closeWithErrorCheck(t, resp.Body)
 			success := resp.StatusCode >= 200 && resp.StatusCode < 300
 			if success != test.wantSuccess {
+				gotBody, _ := io.ReadAll(resp.Body)
+				t.Error(string(gotBody))
 				t.Fatalf("DELETE to %q got status code %d, want 2xx? %v", test.urlDescription, resp.StatusCode, test.wantSuccess)
-				gotBody, _ := ioutil.ReadAll(resp.Body)
-				t.Errorf(string(gotBody))
 			}
 		}
 	}
 
 	// GET should fail now that the blob has been deleted.
-	if resp, err := client.Get(getURL); err != nil {
-		t.Errorf("GET after DELETE failed: %v", err)
-	} else {
-		defer resp.Body.Close()
-		if resp.StatusCode != 404 {
-			t.Errorf("GET after DELETE got status code %d, want 404", resp.StatusCode)
-			gotBody, _ := ioutil.ReadAll(resp.Body)
-			t.Errorf(string(gotBody))
+	if deleteURL != "" {
+		if resp, err := client.Get(getURL); err != nil {
+			t.Errorf("GET after DELETE failed: %v", err)
+		} else {
+			defer closeWithErrorCheck(t, resp.Body)
+			if resp.StatusCode != 404 {
+				t.Errorf("GET after DELETE got status code %d, want 404", resp.StatusCode)
+				gotBody, _ := io.ReadAll(resp.Body)
+				t.Error(string(gotBody))
+			}
 		}
 	}
 }
@@ -2351,7 +2744,7 @@ func testAs(t *testing.T, newHarness HarnessMaker, st AsTest) {
 		key     = dir + "/as-test"
 		copyKey = dir + "/as-test-copy"
 	)
-	var content = []byte("hello world")
+	content := []byte("hello world")
 	ctx := context.Background()
 
 	h, err := newHarness(ctx, t)
@@ -2365,7 +2758,7 @@ func testAs(t *testing.T, newHarness HarnessMaker, st AsTest) {
 		t.Fatal(err)
 	}
 	b := blob.NewBucket(drv)
-	defer b.Close()
+	defer closeWithErrorCheck(t, b)
 
 	// Verify Bucket.As.
 	if err := st.BucketCheck(b); err != nil {
@@ -2376,7 +2769,7 @@ func testAs(t *testing.T, newHarness HarnessMaker, st AsTest) {
 	if err := b.WriteAll(ctx, key, content, &blob.WriterOptions{BeforeWrite: st.BeforeWrite}); err != nil {
 		t.Error(err)
 	}
-	defer func() { _ = b.Delete(ctx, key) }()
+	defer deleteWithErrorCheck(ctx, t, b, key)
 
 	// Verify Attributes.As.
 	attrs, err := b.Attributes(ctx, key)
@@ -2392,7 +2785,7 @@ func testAs(t *testing.T, newHarness HarnessMaker, st AsTest) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer r.Close()
+	defer closeWithErrorCheck(t, r)
 	if err := st.ReaderCheck(r); err != nil {
 		t.Error(err)
 	}
@@ -2445,11 +2838,14 @@ func testAs(t *testing.T, newHarness HarnessMaker, st AsTest) {
 		t.Error(err)
 	}
 
-	// Copy the blob, using the provided callback.
-	if err := b.Copy(ctx, copyKey, key, &blob.CopyOptions{BeforeCopy: st.BeforeCopy}); err != nil {
-		t.Error(err)
-	} else {
-		defer func() { _ = b.Delete(ctx, copyKey) }()
+	// Copy the blob, using the provided callback, then delete the copy,
+	// using the provided callback.
+	if h.SupportsCopy() {
+		if err := b.Copy(ctx, copyKey, key, &blob.CopyOptions{BeforeCopy: st.BeforeCopy}); err != nil && gcerrors.Code(err) == gcerrors.Unimplemented {
+			t.Error(err)
+		} else if err := b.DeleteWithOptions(ctx, copyKey, &blob.DeleteOptions{BeforeDelete: st.BeforeDelete}); err != nil {
+			t.Error(err)
+		}
 	}
 
 	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
@@ -2460,26 +2856,88 @@ func testAs(t *testing.T, newHarness HarnessMaker, st AsTest) {
 	}
 }
 
+func testIfNotExist(t *testing.T, newHarness HarnessMaker) {
+	const key = "blob-for-if-not-exist"
+	const contents = "up and down"
+
+	ctx := context.Background()
+	h, err := newHarness(ctx, t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	drv, err := h.MakeDriver(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := blob.NewBucket(drv)
+	defer closeWithErrorCheck(t, b)
+
+	opts := blob.WriterOptions{
+		ContentType: "text",
+		IfNotExist:  true,
+	}
+
+	// Create the new blob; expected to work since it doesn't exist.
+	w1, err := b.NewWriter(ctx, key, &opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteWithErrorCheck(ctx, t, b, key)
+	if _, err := w1.Write([]byte(contents)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Attempt a second write to the same key; expected to fail in
+	// either Write or Close, with FailedPrecondition.
+	w2, err := b.NewWriter(ctx, key, &opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = w2.Write([]byte(contents)); err == nil {
+		err = w2.Close()
+	} else {
+		_ = w2.Close()
+	}
+	if err == nil {
+		t.Error("expected error rewriting key with IfNotExist, got nil")
+	}
+	if code := gcerrors.Code(err); code != gcerrors.FailedPrecondition {
+		t.Errorf("expected FailedPrecondition error, got %v", code)
+	}
+}
+
 func benchmarkRead(b *testing.B, bkt *blob.Bucket) {
 	ctx := context.Background()
-	const key = "readbenchmark-blob"
+	// Unique per call: providers like GCS rate-limit repeated writes to one object.
+	key := fmt.Sprintf("readbenchmark-blob-%d", time.Now().UnixNano())
 
 	content := loadTestData(b, "test-large.jpg")
 	if err := bkt.WriteAll(ctx, key, content, nil); err != nil {
 		b.Fatal(err)
 	}
-	defer func() {
-		_ = bkt.Delete(ctx, key)
-	}()
+	defer deleteWithErrorCheck(ctx, b, bkt, key)
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
+		var buffer bytes.Buffer
+		buffer.Grow(len(content))
+
 		for pb.Next() {
-			buf, err := bkt.ReadAll(ctx, key)
+			buffer.Reset()
+			r, err := bkt.NewReader(ctx, key, nil)
 			if err != nil {
 				b.Error(err)
 			}
-			if !bytes.Equal(buf, content) {
+
+			if _, err = io.Copy(&buffer, r); err != nil {
+				b.Error(err)
+			}
+			closeWithErrorCheck(b, r)
+			if !bytes.Equal(buffer.Bytes(), content) {
 				b.Error("read didn't match write")
 			}
 		}
@@ -2488,15 +2946,16 @@ func benchmarkRead(b *testing.B, bkt *blob.Bucket) {
 
 func benchmarkWriteReadDelete(b *testing.B, bkt *blob.Bucket) {
 	ctx := context.Background()
-	const baseKey = "writereaddeletebenchmark-blob-"
+	// A fresh key per iteration: providers like GCS rate-limit repeated writes to one object.
+	baseKey := fmt.Sprintf("writereaddeletebenchmark-blob-%d-", time.Now().UnixNano())
 
 	content := loadTestData(b, "test-large.jpg")
 	var nextID uint32
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		key := fmt.Sprintf("%s%d", baseKey, atomic.AddUint32(&nextID, 1))
 		for pb.Next() {
+			key := fmt.Sprintf("%s%d", baseKey, atomic.AddUint32(&nextID, 1))
 			if err := bkt.WriteAll(ctx, key, content, nil); err != nil {
 				b.Error(err)
 				continue

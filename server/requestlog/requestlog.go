@@ -20,12 +20,12 @@ import (
 	"bufio"
 	"errors"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 
-	"go.opencensus.io/trace"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Logger wraps the Log method.  Log must be safe to call from multiple
@@ -51,12 +51,10 @@ func NewHandler(log Logger, h http.Handler) *Handler {
 
 // ServeHTTP calls its underlying handler's ServeHTTP method, then calls
 // Log after the handler returns.
-//
-// ServeHTTP will always consume the request body up to the first error,
-// even if the underlying handler does not.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	sc := trace.FromContext(r.Context()).SpanContext()
+	span := trace.SpanFromContext(r.Context())
+	sc := span.SpanContext()
 	ent := &Entry{
 		Request:           cloneRequestWithoutBody(r),
 		ReceivedTime:      start,
@@ -67,8 +65,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Referer:           r.Referer(),
 		Proto:             r.Proto,
 		RemoteIP:          ipFromHostPort(r.RemoteAddr),
-		TraceID:           sc.TraceID,
-		SpanID:            sc.SpanID,
+		TraceID:           sc.TraceID(),
+		SpanID:            sc.SpanID(),
 	}
 	if addr, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok {
 		ent.ServerIP = ipFromHostPort(addr.String())
@@ -82,12 +80,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.h.ServeHTTP(w2, r2)
 
 	ent.Latency = time.Since(start)
-	if rcc.err == nil && rcc.r != nil && !w2.hijacked {
-		// If the handler hasn't encountered an error in the Body (like EOF),
-		// then consume the rest of the Body to provide an accurate rcc.n.
-		io.Copy(ioutil.Discard, rcc)
-	}
+	// The handler may or may not have read the entire body. If the request
+	// includes a Content-Length header, use that for a more accurate
+	// RequestBodySize.
 	ent.RequestBodySize = rcc.n
+	if contentLengthStr := r.Header.Get("Content-Length"); contentLengthStr != "" {
+		ent.RequestBodySize, _ = strconv.ParseInt(contentLengthStr, 10, 64)
+	}
 	ent.Status = w2.code
 	if ent.Status == 0 {
 		ent.Status = http.StatusOK
@@ -178,7 +177,7 @@ func (wc *writeCounter) Write(p []byte) (n int, err error) {
 
 func headerSize(h http.Header) int64 {
 	var wc writeCounter
-	h.Write(&wc)
+	_ = h.Write(&wc)
 	return int64(wc) + 2 // for CRLF
 }
 
@@ -208,7 +207,7 @@ func (r *responseStats) Write(p []byte) (n int, err error) {
 		r.WriteHeader(http.StatusOK)
 	}
 	n, err = r.w.Write(p)
-	r.wc.Write(p[:n])
+	_, _ = r.wc.Write(p[:n])
 	return
 }
 
@@ -232,4 +231,10 @@ func (r *responseStats) Hijack() (_ net.Conn, _ *bufio.ReadWriter, err error) {
 		return hj.Hijack()
 	}
 	return nil, nil, errors.New("underlying ResponseWriter does not support hijacking")
+}
+
+func (r *responseStats) Flush() {
+	if fl, ok := r.w.(http.Flusher); ok {
+		fl.Flush()
+	}
 }

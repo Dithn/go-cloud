@@ -18,7 +18,7 @@ import (
 	"context"
 	"log"
 
-	"go.etcd.io/etcd/clientv3"
+	"go.etcd.io/etcd/client/v3"
 	"gocloud.dev/runtimevar"
 	"gocloud.dev/runtimevar/etcdvar"
 )
@@ -37,7 +37,7 @@ func ExampleOpenVariable() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer v.Close()
+	defer func() { _ = v.Close() }()
 }
 
 func Example_openVariableFromURL() {
@@ -54,5 +54,5 @@ func Example_openVariableFromURL() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer v.Close()
+	defer func() { _ = v.Close() }()
 }

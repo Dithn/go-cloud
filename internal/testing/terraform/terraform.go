@@ -28,18 +28,18 @@ func ReadOutput(dir string) (map[string]Output, error) {
 	c.Dir = dir
 	data, err := c.Output()
 	if err != nil {
-		return nil, fmt.Errorf("read terraform output: %v", err)
+		return nil, fmt.Errorf("read terraform output: %w", err)
 	}
 	var parsed map[string]Output
 	if err := json.Unmarshal(data, &parsed); err != nil {
-		return nil, fmt.Errorf("read terraform output: %v", err)
+		return nil, fmt.Errorf("read terraform output: %w", err)
 	}
 	return parsed, nil
 }
 
 // Output describes a single output value.
 type Output struct {
-	Type      string      `json:"type"` // one of "string", "list", or "map"
-	Sensitive bool        `json:"sensitive"`
-	Value     interface{} `json:"value"`
+	Type      string `json:"type"` // one of "string", "list", or "map"
+	Sensitive bool   `json:"sensitive"`
+	Value     any    `json:"value"`
 }

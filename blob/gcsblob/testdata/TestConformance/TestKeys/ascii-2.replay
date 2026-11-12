@@ -1,12 +1,14 @@
 {
-  "Initial": "AQAAAA7XW2bGFHUZ/f4g",
+  "Initial": "AQAAAA7hTgxbBKKKagAA",
   "Version": "0.2",
   "Converter": {
     "ScrubBody": null,
     "ClearHeaders": [
       "^X-Goog-.*Encryption-Key$",
       "^Expires$",
-      "^Signature$"
+      "^Signature$",
+      "^X-Goog-Gcs-Idempotency-Token$",
+      "^User-Agent$"
     ],
     "RemoveRequestHeaders": [
       "^Authorization$",
@@ -35,7 +37,7 @@
   },
   "Entries": [
     {
-      "ID": "e71416d660fbc48c",
+      "ID": "4eb0c87ccb78cb1d",
       "Request": {
         "Method": "POST",
         "URL": "https://storage.googleapis.com/upload/storage/v1/b/go-cloud-blob-test-bucket/o?alt=json\u0026name=weird-keys%10%11%12%13%14%15%16%17%18%19%1A%1B%1C%1D%1E%1F\u0026prettyPrint=false\u0026projection=full\u0026uploadType=multipart",
@@ -44,12 +46,12 @@
             "gzip"
           ],
           "User-Agent": [
-            "google-api-go-client/0.5 go-cloud/blob/0.1.0"
+            "CLEARED"
           ]
         },
         "MediaType": "multipart/related",
         "BodyParts": [
-          "eyJidWNrZXQiOiJnby1jbG91ZC1ibG9iLXRlc3QtYnVja2V0IiwiY29udGVudFR5cGUiOiJ0ZXh0L3BsYWluOyBjaGFyc2V0PXV0Zi04IiwibWQ1SGFzaCI6IlhVRkFLcnhMS25hNWNaMlJFQmZGa2c9PSIsIm5hbWUiOiJ3ZWlyZC1rZXlzXHUwMDEwXHUwMDExXHUwMDEyXHUwMDEzXHUwMDE0XHUwMDE1XHUwMDE2XHUwMDE3XHUwMDE4XHUwMDE5XHUwMDFhXHUwMDFiXHUwMDFjXHUwMDFkXHUwMDFlXHUwMDFmIn0K",
+          "eyJidWNrZXQiOiJnby1jbG91ZC1ibG9iLXRlc3QtYnVja2V0IiwiY29udGVudFR5cGUiOiJ0ZXh0L3BsYWluOyBjaGFyc2V0PXV0Zi04IiwiY3JjMzJjIjoibW5HN1RBPT0iLCJtZDVIYXNoIjoiWFVGQUtyeExLbmE1Y1oyUkVCZkZrZz09IiwibmFtZSI6IndlaXJkLWtleXNcdTAwMTBcdTAwMTFcdTAwMTJcdTAwMTNcdTAwMTRcdTAwMTVcdTAwMTZcdTAwMTdcdTAwMThcdTAwMTlcdTAwMWFcdTAwMWJcdTAwMWNcdTAwMWRcdTAwMWVcdTAwMWYifQo=",
           "aGVsbG8="
         ]
       },
@@ -59,23 +61,20 @@
         "ProtoMajor": 1,
         "ProtoMinor": 1,
         "Header": {
-          "Alt-Svc": [
-            "h3-29=\":443\"; ma=2592000,h3-T051=\":443\"; ma=2592000,h3-Q050=\":443\"; ma=2592000,h3-Q046=\":443\"; ma=2592000,h3-Q043=\":443\"; ma=2592000,quic=\":443\"; ma=2592000; v=\"46,43\""
-          ],
           "Cache-Control": [
             "no-cache, no-store, max-age=0, must-revalidate"
           ],
           "Content-Length": [
-            "3938"
+            "1056"
           ],
           "Content-Type": [
             "application/json; charset=UTF-8"
           ],
           "Date": [
-            "Thu, 03 Dec 2020 23:07:50 GMT"
+            "Thu, 19 Mar 2026 15:25:15 GMT"
           ],
           "Etag": [
-            "CLDqv+72su0CEAE="
+            "CPvm/eairJMDEAE="
           ],
           "Expires": [
             "CLEARED"
@@ -90,24 +89,15 @@
             "Origin",
             "X-Origin"
           ],
-          "X-Guploader-Customer": [
-            "apiary_cloudstorage_single_post_uploads"
-          ],
-          "X-Guploader-Request-Result": [
-            "success"
-          ],
-          "X-Guploader-Upload-Result": [
-            "success"
-          ],
           "X-Guploader-Uploadid": [
-            "ABg5-Uy_0kg-DOeWp1jk6U7gGLeOm_WJUIExaHxoyKcFj1V16IINv8ZuutfDOJUsBQvfV94surTAA7nrr6qmlSCyF-4"
+            "AGQBYWyxbLHG3FhmsFCNViL-I19VXiWInKgzrHoBjaL5M2Tl5R0ExVpv9FJ4iVZWo1djyqkj"
           ]
         },
-        "Body": "eyJraW5kIjoic3RvcmFnZSNvYmplY3QiLCJpZCI6ImdvLWNsb3VkLWJsb2ItdGVzdC1idWNrZXQvd2VpcmQta2V5c1x1MDAxMFx1MDAxMVx1MDAxMlx1MDAxM1x1MDAxNFx1MDAxNVx1MDAxNlx1MDAxN1x1MDAxOFx1MDAxOVx1MDAxYVx1MDAxYlx1MDAxY1x1MDAxZFx1MDAxZVx1MDAxZi8xNjA3MDM2ODcwNTg3Njk2Iiwic2VsZkxpbmsiOiJodHRwczovL3d3dy5nb29nbGVhcGlzLmNvbS9zdG9yYWdlL3YxL2IvZ28tY2xvdWQtYmxvYi10ZXN0LWJ1Y2tldC9vL3dlaXJkLWtleXMlMTAlMTElMTIlMTMlMTQlMTUlMTYlMTclMTglMTklMUElMUIlMUMlMUQlMUUlMUYiLCJtZWRpYUxpbmsiOiJodHRwczovL3N0b3JhZ2UuZ29vZ2xlYXBpcy5jb20vZG93bmxvYWQvc3RvcmFnZS92MS9iL2dvLWNsb3VkLWJsb2ItdGVzdC1idWNrZXQvby93ZWlyZC1rZXlzJTEwJTExJTEyJTEzJTE0JTE1JTE2JTE3JTE4JTE5JTFBJTFCJTFDJTFEJTFFJTFGP2dlbmVyYXRpb249MTYwNzAzNjg3MDU4NzY5NiZhbHQ9bWVkaWEiLCJuYW1lIjoid2VpcmQta2V5c1x1MDAxMFx1MDAxMVx1MDAxMlx1MDAxM1x1MDAxNFx1MDAxNVx1MDAxNlx1MDAxN1x1MDAxOFx1MDAxOVx1MDAxYVx1MDAxYlx1MDAxY1x1MDAxZFx1MDAxZVx1MDAxZiIsImJ1Y2tldCI6ImdvLWNsb3VkLWJsb2ItdGVzdC1idWNrZXQiLCJnZW5lcmF0aW9uIjoiMTYwNzAzNjg3MDU4NzY5NiIsIm1ldGFnZW5lcmF0aW9uIjoiMSIsImNvbnRlbnRUeXBlIjoidGV4dC9wbGFpbjsgY2hhcnNldD11dGYtOCIsInN0b3JhZ2VDbGFzcyI6IlJFR0lPTkFMIiwic2l6ZSI6IjUiLCJtZDVIYXNoIjoiWFVGQUtyeExLbmE1Y1oyUkVCZkZrZz09IiwiY3JjMzJjIjoibW5HN1RBPT0iLCJldGFnIjoiQ0xEcXYrNzJzdTBDRUFFPSIsInRpbWVDcmVhdGVkIjoiMjAyMC0xMi0wM1QyMzowNzo1MC41ODdaIiwidXBkYXRlZCI6IjIwMjAtMTItMDNUMjM6MDc6NTAuNTg3WiIsInRpbWVTdG9yYWdlQ2xhc3NVcGRhdGVkIjoiMjAyMC0xMi0wM1QyMzowNzo1MC41ODdaIiwiYWNsIjpbeyJraW5kIjoic3RvcmFnZSNvYmplY3RBY2Nlc3NDb250cm9sIiwib2JqZWN0Ijoid2VpcmQta2V5c1x1MDAxMFx1MDAxMVx1MDAxMlx1MDAxM1x1MDAxNFx1MDAxNVx1MDAxNlx1MDAxN1x1MDAxOFx1MDAxOVx1MDAxYVx1MDAxYlx1MDAxY1x1MDAxZFx1MDAxZVx1MDAxZiIsImdlbmVyYXRpb24iOiIxNjA3MDM2ODcwNTg3Njk2IiwiaWQiOiJnby1jbG91ZC1ibG9iLXRlc3QtYnVja2V0L3dlaXJkLWtleXNcdTAwMTBcdTAwMTFcdTAwMTJcdTAwMTNcdTAwMTRcdTAwMTVcdTAwMTZcdTAwMTdcdTAwMThcdTAwMTlcdTAwMWFcdTAwMWJcdTAwMWNcdTAwMWRcdTAwMWVcdTAwMWYvMTYwNzAzNjg3MDU4NzY5Ni9wcm9qZWN0LW93bmVycy04OTI5NDI2MzgxMjkiLCJzZWxmTGluayI6Imh0dHBzOi8vd3d3Lmdvb2dsZWFwaXMuY29tL3N0b3JhZ2UvdjEvYi9nby1jbG91ZC1ibG9iLXRlc3QtYnVja2V0L28vd2VpcmQta2V5cyUxMCUxMSUxMiUxMyUxNCUxNSUxNiUxNyUxOCUxOSUxQSUxQiUxQyUxRCUxRSUxRi9hY2wvcHJvamVjdC1vd25lcnMtODkyOTQyNjM4MTI5IiwiYnVja2V0IjoiZ28tY2xvdWQtYmxvYi10ZXN0LWJ1Y2tldCIsImVudGl0eSI6InByb2plY3Qtb3duZXJzLTg5Mjk0MjYzODEyOSIsInJvbGUiOiJPV05FUiIsImV0YWciOiJDTERxdis3MnN1MENFQUU9IiwicHJvamVjdFRlYW0iOnsicHJvamVjdE51bWJlciI6Ijg5Mjk0MjYzODEyOSIsInRlYW0iOiJvd25lcnMifX0seyJraW5kIjoic3RvcmFnZSNvYmplY3RBY2Nlc3NDb250cm9sIiwib2JqZWN0Ijoid2VpcmQta2V5c1x1MDAxMFx1MDAxMVx1MDAxMlx1MDAxM1x1MDAxNFx1MDAxNVx1MDAxNlx1MDAxN1x1MDAxOFx1MDAxOVx1MDAxYVx1MDAxYlx1MDAxY1x1MDAxZFx1MDAxZVx1MDAxZiIsImdlbmVyYXRpb24iOiIxNjA3MDM2ODcwNTg3Njk2IiwiaWQiOiJnby1jbG91ZC1ibG9iLXRlc3QtYnVja2V0L3dlaXJkLWtleXNcdTAwMTBcdTAwMTFcdTAwMTJcdTAwMTNcdTAwMTRcdTAwMTVcdTAwMTZcdTAwMTdcdTAwMThcdTAwMTlcdTAwMWFcdTAwMWJcdTAwMWNcdTAwMWRcdTAwMWVcdTAwMWYvMTYwNzAzNjg3MDU4NzY5Ni9wcm9qZWN0LWVkaXRvcnMtODkyOTQyNjM4MTI5Iiwic2VsZkxpbmsiOiJodHRwczovL3d3dy5nb29nbGVhcGlzLmNvbS9zdG9yYWdlL3YxL2IvZ28tY2xvdWQtYmxvYi10ZXN0LWJ1Y2tldC9vL3dlaXJkLWtleXMlMTAlMTElMTIlMTMlMTQlMTUlMTYlMTclMTglMTklMUElMUIlMUMlMUQlMUUlMUYvYWNsL3Byb2plY3QtZWRpdG9ycy04OTI5NDI2MzgxMjkiLCJidWNrZXQiOiJnby1jbG91ZC1ibG9iLXRlc3QtYnVja2V0IiwiZW50aXR5IjoicHJvamVjdC1lZGl0b3JzLTg5Mjk0MjYzODEyOSIsInJvbGUiOiJPV05FUiIsImV0YWciOiJDTERxdis3MnN1MENFQUU9IiwicHJvamVjdFRlYW0iOnsicHJvamVjdE51bWJlciI6Ijg5Mjk0MjYzODEyOSIsInRlYW0iOiJlZGl0b3JzIn19LHsia2luZCI6InN0b3JhZ2Ujb2JqZWN0QWNjZXNzQ29udHJvbCIsIm9iamVjdCI6IndlaXJkLWtleXNcdTAwMTBcdTAwMTFcdTAwMTJcdTAwMTNcdTAwMTRcdTAwMTVcdTAwMTZcdTAwMTdcdTAwMThcdTAwMTlcdTAwMWFcdTAwMWJcdTAwMWNcdTAwMWRcdTAwMWVcdTAwMWYiLCJnZW5lcmF0aW9uIjoiMTYwNzAzNjg3MDU4NzY5NiIsImlkIjoiZ28tY2xvdWQtYmxvYi10ZXN0LWJ1Y2tldC93ZWlyZC1rZXlzXHUwMDEwXHUwMDExXHUwMDEyXHUwMDEzXHUwMDE0XHUwMDE1XHUwMDE2XHUwMDE3XHUwMDE4XHUwMDE5XHUwMDFhXHUwMDFiXHUwMDFjXHUwMDFkXHUwMDFlXHUwMDFmLzE2MDcwMzY4NzA1ODc2OTYvcHJvamVjdC12aWV3ZXJzLTg5Mjk0MjYzODEyOSIsInNlbGZMaW5rIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vc3RvcmFnZS92MS9iL2dvLWNsb3VkLWJsb2ItdGVzdC1idWNrZXQvby93ZWlyZC1rZXlzJTEwJTExJTEyJTEzJTE0JTE1JTE2JTE3JTE4JTE5JTFBJTFCJTFDJTFEJTFFJTFGL2FjbC9wcm9qZWN0LXZpZXdlcnMtODkyOTQyNjM4MTI5IiwiYnVja2V0IjoiZ28tY2xvdWQtYmxvYi10ZXN0LWJ1Y2tldCIsImVudGl0eSI6InByb2plY3Qtdmlld2Vycy04OTI5NDI2MzgxMjkiLCJyb2xlIjoiUkVBREVSIiwiZXRhZyI6IkNMRHF2Kzcyc3UwQ0VBRT0iLCJwcm9qZWN0VGVhbSI6eyJwcm9qZWN0TnVtYmVyIjoiODkyOTQyNjM4MTI5IiwidGVhbSI6InZpZXdlcnMifX0seyJraW5kIjoic3RvcmFnZSNvYmplY3RBY2Nlc3NDb250cm9sIiwib2JqZWN0Ijoid2VpcmQta2V5c1x1MDAxMFx1MDAxMVx1MDAxMlx1MDAxM1x1MDAxNFx1MDAxNVx1MDAxNlx1MDAxN1x1MDAxOFx1MDAxOVx1MDAxYVx1MDAxYlx1MDAxY1x1MDAxZFx1MDAxZVx1MDAxZiIsImdlbmVyYXRpb24iOiIxNjA3MDM2ODcwNTg3Njk2IiwiaWQiOiJnby1jbG91ZC1ibG9iLXRlc3QtYnVja2V0L3dlaXJkLWtleXNcdTAwMTBcdTAwMTFcdTAwMTJcdTAwMTNcdTAwMTRcdTAwMTVcdTAwMTZcdTAwMTdcdTAwMThcdTAwMTlcdTAwMWFcdTAwMWJcdTAwMWNcdTAwMWRcdTAwMWVcdTAwMWYvMTYwNzAzNjg3MDU4NzY5Ni91c2VyLXJ2YW5nZW50QGdvb2dsZS5jb20iLCJzZWxmTGluayI6Imh0dHBzOi8vd3d3Lmdvb2dsZWFwaXMuY29tL3N0b3JhZ2UvdjEvYi9nby1jbG91ZC1ibG9iLXRlc3QtYnVja2V0L28vd2VpcmQta2V5cyUxMCUxMSUxMiUxMyUxNCUxNSUxNiUxNyUxOCUxOSUxQSUxQiUxQyUxRCUxRSUxRi9hY2wvdXNlci1ydmFuZ2VudEBnb29nbGUuY29tIiwiYnVja2V0IjoiZ28tY2xvdWQtYmxvYi10ZXN0LWJ1Y2tldCIsImVudGl0eSI6InVzZXItcnZhbmdlbnRAZ29vZ2xlLmNvbSIsInJvbGUiOiJPV05FUiIsImVtYWlsIjoicnZhbmdlbnRAZ29vZ2xlLmNvbSIsImV0YWciOiJDTERxdis3MnN1MENFQUU9In1dLCJvd25lciI6eyJlbnRpdHkiOiJ1c2VyLXJ2YW5nZW50QGdvb2dsZS5jb20ifX0="
+        "Body": "eyJraW5kIjoic3RvcmFnZSNvYmplY3QiLCJpZCI6ImdvLWNsb3VkLWJsb2ItdGVzdC1idWNrZXQvd2VpcmQta2V5c1x1MDAxMFx1MDAxMVx1MDAxMlx1MDAxM1x1MDAxNFx1MDAxNVx1MDAxNlx1MDAxN1x1MDAxOFx1MDAxOVx1MDAxYVx1MDAxYlx1MDAxY1x1MDAxZFx1MDAxZVx1MDAxZi8xNzczOTMzOTE1MjM5MjkxIiwic2VsZkxpbmsiOiJodHRwczovL3d3dy5nb29nbGVhcGlzLmNvbS9zdG9yYWdlL3YxL2IvZ28tY2xvdWQtYmxvYi10ZXN0LWJ1Y2tldC9vL3dlaXJkLWtleXMlMTAlMTElMTIlMTMlMTQlMTUlMTYlMTclMTglMTklMUElMUIlMUMlMUQlMUUlMUYiLCJtZWRpYUxpbmsiOiJodHRwczovL3N0b3JhZ2UuZ29vZ2xlYXBpcy5jb20vZG93bmxvYWQvc3RvcmFnZS92MS9iL2dvLWNsb3VkLWJsb2ItdGVzdC1idWNrZXQvby93ZWlyZC1rZXlzJTEwJTExJTEyJTEzJTE0JTE1JTE2JTE3JTE4JTE5JTFBJTFCJTFDJTFEJTFFJTFGP2dlbmVyYXRpb249MTc3MzkzMzkxNTIzOTI5MSZhbHQ9bWVkaWEiLCJuYW1lIjoid2VpcmQta2V5c1x1MDAxMFx1MDAxMVx1MDAxMlx1MDAxM1x1MDAxNFx1MDAxNVx1MDAxNlx1MDAxN1x1MDAxOFx1MDAxOVx1MDAxYVx1MDAxYlx1MDAxY1x1MDAxZFx1MDAxZVx1MDAxZiIsImJ1Y2tldCI6ImdvLWNsb3VkLWJsb2ItdGVzdC1idWNrZXQiLCJnZW5lcmF0aW9uIjoiMTc3MzkzMzkxNTIzOTI5MSIsIm1ldGFnZW5lcmF0aW9uIjoiMSIsImNvbnRlbnRUeXBlIjoidGV4dC9wbGFpbjsgY2hhcnNldD11dGYtOCIsInN0b3JhZ2VDbGFzcyI6IlJFR0lPTkFMIiwic2l6ZSI6IjUiLCJtZDVIYXNoIjoiWFVGQUtyeExLbmE1Y1oyUkVCZkZrZz09IiwiY3JjMzJjIjoibW5HN1RBPT0iLCJldGFnIjoiQ1B2bS9lYWlySk1ERUFFPSIsInRpbWVDcmVhdGVkIjoiMjAyNi0wMy0xOVQxNToyNToxNS4yNDJaIiwidXBkYXRlZCI6IjIwMjYtMDMtMTlUMTU6MjU6MTUuMjQyWiIsInRpbWVTdG9yYWdlQ2xhc3NVcGRhdGVkIjoiMjAyNi0wMy0xOVQxNToyNToxNS4yNDJaIiwidGltZUZpbmFsaXplZCI6IjIwMjYtMDMtMTlUMTU6MjU6MTUuMjQyWiJ9"
       }
     },
     {
-      "ID": "fbdc155abc72bbe3",
+      "ID": "650ffcd631e69635",
       "Request": {
         "Method": "GET",
         "URL": "https://storage.googleapis.com/go-cloud-blob-test-bucket/weird-keys%10%11%12%13%14%15%16%17%18%19%1A%1B%1C%1D%1E%1F",
@@ -116,7 +106,10 @@
             "gzip"
           ],
           "User-Agent": [
-            "go-cloud/blob/0.1.0"
+            "CLEARED"
+          ],
+          "X-Goog-Gcs-Idempotency-Token": [
+            "CLEARED"
           ]
         },
         "MediaType": "",
@@ -133,9 +126,6 @@
           "Accept-Ranges": [
             "bytes"
           ],
-          "Alt-Svc": [
-            "h3-29=\":443\"; ma=2592000,h3-T051=\":443\"; ma=2592000,h3-Q050=\":443\"; ma=2592000,h3-Q046=\":443\"; ma=2592000,h3-Q043=\":443\"; ma=2592000,quic=\":443\"; ma=2592000; v=\"46,43\""
-          ],
           "Cache-Control": [
             "private, max-age=0"
           ],
@@ -146,7 +136,7 @@
             "text/plain; charset=utf-8"
           ],
           "Date": [
-            "Thu, 03 Dec 2020 23:07:50 GMT"
+            "Thu, 19 Mar 2026 15:25:15 GMT"
           ],
           "Etag": [
             "\"5d41402abc4b2a76b9719d911017c592\""
@@ -155,13 +145,13 @@
             "CLEARED"
           ],
           "Last-Modified": [
-            "Thu, 03 Dec 2020 23:07:50 GMT"
+            "Thu, 19 Mar 2026 15:25:15 GMT"
           ],
           "Server": [
             "UploadServer"
           ],
           "X-Goog-Generation": [
-            "1607036870587696"
+            "1773933915239291"
           ],
           "X-Goog-Hash": [
             "crc32c=mnG7TA==",
@@ -179,24 +169,15 @@
           "X-Goog-Stored-Content-Length": [
             "5"
           ],
-          "X-Guploader-Customer": [
-            "cloud-storage"
-          ],
-          "X-Guploader-Request-Result": [
-            "success"
-          ],
-          "X-Guploader-Upload-Result": [
-            "success"
-          ],
           "X-Guploader-Uploadid": [
-            "ABg5-UyqfnCoVGRxx5A5aljcHNZeQmndAZo5XrDLrzJj669s0j4Oz7PHNhZKI1G9nbnaaDL9xGWw_yhNuYlvEev_wJKk7e90vg"
+            "AGQBYWwh0cYb8IfGn3zNgCRiAWPcWF5J_GamIAzRAeqxRq_upSZHRw1EOnGfobntxrQ6HkDb"
           ]
         },
         "Body": "aGVsbG8="
       }
     },
     {
-      "ID": "cb5bdd73ca55dc10",
+      "ID": "31ba3af5309709cc",
       "Request": {
         "Method": "GET",
         "URL": "https://storage.googleapis.com/storage/v1/b/go-cloud-blob-test-bucket/o/weird-keys%10%11%12%13%14%15%16%17%18%19%1A%1B%1C%1D%1E%1F?alt=json\u0026prettyPrint=false\u0026projection=full",
@@ -205,7 +186,10 @@
             "gzip"
           ],
           "User-Agent": [
-            "google-api-go-client/0.5 go-cloud/blob/0.1.0"
+            "CLEARED"
+          ],
+          "X-Goog-Gcs-Idempotency-Token": [
+            "CLEARED"
           ]
         },
         "MediaType": "",
@@ -219,23 +203,20 @@
         "ProtoMajor": 1,
         "ProtoMinor": 1,
         "Header": {
-          "Alt-Svc": [
-            "h3-29=\":443\"; ma=2592000,h3-T051=\":443\"; ma=2592000,h3-Q050=\":443\"; ma=2592000,h3-Q046=\":443\"; ma=2592000,h3-Q043=\":443\"; ma=2592000,quic=\":443\"; ma=2592000; v=\"46,43\""
-          ],
           "Cache-Control": [
             "private, max-age=0, must-revalidate, no-transform"
           ],
           "Content-Length": [
-            "3938"
+            "1056"
           ],
           "Content-Type": [
             "application/json; charset=UTF-8"
           ],
           "Date": [
-            "Thu, 03 Dec 2020 23:07:50 GMT"
+            "Thu, 19 Mar 2026 15:25:15 GMT"
           ],
           "Etag": [
-            "CLDqv+72su0CEAE="
+            "CPvm/eairJMDEAE="
           ],
           "Expires": [
             "CLEARED"
@@ -247,24 +228,15 @@
             "Origin",
             "X-Origin"
           ],
-          "X-Guploader-Customer": [
-            "apiary_cloudstorage_metadata"
-          ],
-          "X-Guploader-Request-Result": [
-            "success"
-          ],
-          "X-Guploader-Upload-Result": [
-            "success"
-          ],
           "X-Guploader-Uploadid": [
-            "ABg5-UzHxWd8Gor0PJ5EFuWgHzVFpQdNqDQJ7AptJTBL9BLGIGqGRMH_b3Nv1uwVnx9zlyNoIYVmTiTN2saLPTY9BqbUtAQeFA"
+            "AGQBYWz5lZGNgqJUqIOdPe8JjNJyXJjmZbZX3DEGwR_xNBWl1rQCb6zPX1xgr3xMfeBn986J"
           ]
         },
-        "Body": "eyJraW5kIjoic3RvcmFnZSNvYmplY3QiLCJpZCI6ImdvLWNsb3VkLWJsb2ItdGVzdC1idWNrZXQvd2VpcmQta2V5c1x1MDAxMFx1MDAxMVx1MDAxMlx1MDAxM1x1MDAxNFx1MDAxNVx1MDAxNlx1MDAxN1x1MDAxOFx1MDAxOVx1MDAxYVx1MDAxYlx1MDAxY1x1MDAxZFx1MDAxZVx1MDAxZi8xNjA3MDM2ODcwNTg3Njk2Iiwic2VsZkxpbmsiOiJodHRwczovL3d3dy5nb29nbGVhcGlzLmNvbS9zdG9yYWdlL3YxL2IvZ28tY2xvdWQtYmxvYi10ZXN0LWJ1Y2tldC9vL3dlaXJkLWtleXMlMTAlMTElMTIlMTMlMTQlMTUlMTYlMTclMTglMTklMUElMUIlMUMlMUQlMUUlMUYiLCJtZWRpYUxpbmsiOiJodHRwczovL3N0b3JhZ2UuZ29vZ2xlYXBpcy5jb20vZG93bmxvYWQvc3RvcmFnZS92MS9iL2dvLWNsb3VkLWJsb2ItdGVzdC1idWNrZXQvby93ZWlyZC1rZXlzJTEwJTExJTEyJTEzJTE0JTE1JTE2JTE3JTE4JTE5JTFBJTFCJTFDJTFEJTFFJTFGP2dlbmVyYXRpb249MTYwNzAzNjg3MDU4NzY5NiZhbHQ9bWVkaWEiLCJuYW1lIjoid2VpcmQta2V5c1x1MDAxMFx1MDAxMVx1MDAxMlx1MDAxM1x1MDAxNFx1MDAxNVx1MDAxNlx1MDAxN1x1MDAxOFx1MDAxOVx1MDAxYVx1MDAxYlx1MDAxY1x1MDAxZFx1MDAxZVx1MDAxZiIsImJ1Y2tldCI6ImdvLWNsb3VkLWJsb2ItdGVzdC1idWNrZXQiLCJnZW5lcmF0aW9uIjoiMTYwNzAzNjg3MDU4NzY5NiIsIm1ldGFnZW5lcmF0aW9uIjoiMSIsImNvbnRlbnRUeXBlIjoidGV4dC9wbGFpbjsgY2hhcnNldD11dGYtOCIsInN0b3JhZ2VDbGFzcyI6IlJFR0lPTkFMIiwic2l6ZSI6IjUiLCJtZDVIYXNoIjoiWFVGQUtyeExLbmE1Y1oyUkVCZkZrZz09IiwiY3JjMzJjIjoibW5HN1RBPT0iLCJldGFnIjoiQ0xEcXYrNzJzdTBDRUFFPSIsInRpbWVDcmVhdGVkIjoiMjAyMC0xMi0wM1QyMzowNzo1MC41ODdaIiwidXBkYXRlZCI6IjIwMjAtMTItMDNUMjM6MDc6NTAuNTg3WiIsInRpbWVTdG9yYWdlQ2xhc3NVcGRhdGVkIjoiMjAyMC0xMi0wM1QyMzowNzo1MC41ODdaIiwiYWNsIjpbeyJraW5kIjoic3RvcmFnZSNvYmplY3RBY2Nlc3NDb250cm9sIiwib2JqZWN0Ijoid2VpcmQta2V5c1x1MDAxMFx1MDAxMVx1MDAxMlx1MDAxM1x1MDAxNFx1MDAxNVx1MDAxNlx1MDAxN1x1MDAxOFx1MDAxOVx1MDAxYVx1MDAxYlx1MDAxY1x1MDAxZFx1MDAxZVx1MDAxZiIsImdlbmVyYXRpb24iOiIxNjA3MDM2ODcwNTg3Njk2IiwiaWQiOiJnby1jbG91ZC1ibG9iLXRlc3QtYnVja2V0L3dlaXJkLWtleXNcdTAwMTBcdTAwMTFcdTAwMTJcdTAwMTNcdTAwMTRcdTAwMTVcdTAwMTZcdTAwMTdcdTAwMThcdTAwMTlcdTAwMWFcdTAwMWJcdTAwMWNcdTAwMWRcdTAwMWVcdTAwMWYvMTYwNzAzNjg3MDU4NzY5Ni9wcm9qZWN0LW93bmVycy04OTI5NDI2MzgxMjkiLCJzZWxmTGluayI6Imh0dHBzOi8vd3d3Lmdvb2dsZWFwaXMuY29tL3N0b3JhZ2UvdjEvYi9nby1jbG91ZC1ibG9iLXRlc3QtYnVja2V0L28vd2VpcmQta2V5cyUxMCUxMSUxMiUxMyUxNCUxNSUxNiUxNyUxOCUxOSUxQSUxQiUxQyUxRCUxRSUxRi9hY2wvcHJvamVjdC1vd25lcnMtODkyOTQyNjM4MTI5IiwiYnVja2V0IjoiZ28tY2xvdWQtYmxvYi10ZXN0LWJ1Y2tldCIsImVudGl0eSI6InByb2plY3Qtb3duZXJzLTg5Mjk0MjYzODEyOSIsInJvbGUiOiJPV05FUiIsImV0YWciOiJDTERxdis3MnN1MENFQUU9IiwicHJvamVjdFRlYW0iOnsicHJvamVjdE51bWJlciI6Ijg5Mjk0MjYzODEyOSIsInRlYW0iOiJvd25lcnMifX0seyJraW5kIjoic3RvcmFnZSNvYmplY3RBY2Nlc3NDb250cm9sIiwib2JqZWN0Ijoid2VpcmQta2V5c1x1MDAxMFx1MDAxMVx1MDAxMlx1MDAxM1x1MDAxNFx1MDAxNVx1MDAxNlx1MDAxN1x1MDAxOFx1MDAxOVx1MDAxYVx1MDAxYlx1MDAxY1x1MDAxZFx1MDAxZVx1MDAxZiIsImdlbmVyYXRpb24iOiIxNjA3MDM2ODcwNTg3Njk2IiwiaWQiOiJnby1jbG91ZC1ibG9iLXRlc3QtYnVja2V0L3dlaXJkLWtleXNcdTAwMTBcdTAwMTFcdTAwMTJcdTAwMTNcdTAwMTRcdTAwMTVcdTAwMTZcdTAwMTdcdTAwMThcdTAwMTlcdTAwMWFcdTAwMWJcdTAwMWNcdTAwMWRcdTAwMWVcdTAwMWYvMTYwNzAzNjg3MDU4NzY5Ni9wcm9qZWN0LWVkaXRvcnMtODkyOTQyNjM4MTI5Iiwic2VsZkxpbmsiOiJodHRwczovL3d3dy5nb29nbGVhcGlzLmNvbS9zdG9yYWdlL3YxL2IvZ28tY2xvdWQtYmxvYi10ZXN0LWJ1Y2tldC9vL3dlaXJkLWtleXMlMTAlMTElMTIlMTMlMTQlMTUlMTYlMTclMTglMTklMUElMUIlMUMlMUQlMUUlMUYvYWNsL3Byb2plY3QtZWRpdG9ycy04OTI5NDI2MzgxMjkiLCJidWNrZXQiOiJnby1jbG91ZC1ibG9iLXRlc3QtYnVja2V0IiwiZW50aXR5IjoicHJvamVjdC1lZGl0b3JzLTg5Mjk0MjYzODEyOSIsInJvbGUiOiJPV05FUiIsImV0YWciOiJDTERxdis3MnN1MENFQUU9IiwicHJvamVjdFRlYW0iOnsicHJvamVjdE51bWJlciI6Ijg5Mjk0MjYzODEyOSIsInRlYW0iOiJlZGl0b3JzIn19LHsia2luZCI6InN0b3JhZ2Ujb2JqZWN0QWNjZXNzQ29udHJvbCIsIm9iamVjdCI6IndlaXJkLWtleXNcdTAwMTBcdTAwMTFcdTAwMTJcdTAwMTNcdTAwMTRcdTAwMTVcdTAwMTZcdTAwMTdcdTAwMThcdTAwMTlcdTAwMWFcdTAwMWJcdTAwMWNcdTAwMWRcdTAwMWVcdTAwMWYiLCJnZW5lcmF0aW9uIjoiMTYwNzAzNjg3MDU4NzY5NiIsImlkIjoiZ28tY2xvdWQtYmxvYi10ZXN0LWJ1Y2tldC93ZWlyZC1rZXlzXHUwMDEwXHUwMDExXHUwMDEyXHUwMDEzXHUwMDE0XHUwMDE1XHUwMDE2XHUwMDE3XHUwMDE4XHUwMDE5XHUwMDFhXHUwMDFiXHUwMDFjXHUwMDFkXHUwMDFlXHUwMDFmLzE2MDcwMzY4NzA1ODc2OTYvcHJvamVjdC12aWV3ZXJzLTg5Mjk0MjYzODEyOSIsInNlbGZMaW5rIjoiaHR0cHM6Ly93d3cuZ29vZ2xlYXBpcy5jb20vc3RvcmFnZS92MS9iL2dvLWNsb3VkLWJsb2ItdGVzdC1idWNrZXQvby93ZWlyZC1rZXlzJTEwJTExJTEyJTEzJTE0JTE1JTE2JTE3JTE4JTE5JTFBJTFCJTFDJTFEJTFFJTFGL2FjbC9wcm9qZWN0LXZpZXdlcnMtODkyOTQyNjM4MTI5IiwiYnVja2V0IjoiZ28tY2xvdWQtYmxvYi10ZXN0LWJ1Y2tldCIsImVudGl0eSI6InByb2plY3Qtdmlld2Vycy04OTI5NDI2MzgxMjkiLCJyb2xlIjoiUkVBREVSIiwiZXRhZyI6IkNMRHF2Kzcyc3UwQ0VBRT0iLCJwcm9qZWN0VGVhbSI6eyJwcm9qZWN0TnVtYmVyIjoiODkyOTQyNjM4MTI5IiwidGVhbSI6InZpZXdlcnMifX0seyJraW5kIjoic3RvcmFnZSNvYmplY3RBY2Nlc3NDb250cm9sIiwib2JqZWN0Ijoid2VpcmQta2V5c1x1MDAxMFx1MDAxMVx1MDAxMlx1MDAxM1x1MDAxNFx1MDAxNVx1MDAxNlx1MDAxN1x1MDAxOFx1MDAxOVx1MDAxYVx1MDAxYlx1MDAxY1x1MDAxZFx1MDAxZVx1MDAxZiIsImdlbmVyYXRpb24iOiIxNjA3MDM2ODcwNTg3Njk2IiwiaWQiOiJnby1jbG91ZC1ibG9iLXRlc3QtYnVja2V0L3dlaXJkLWtleXNcdTAwMTBcdTAwMTFcdTAwMTJcdTAwMTNcdTAwMTRcdTAwMTVcdTAwMTZcdTAwMTdcdTAwMThcdTAwMTlcdTAwMWFcdTAwMWJcdTAwMWNcdTAwMWRcdTAwMWVcdTAwMWYvMTYwNzAzNjg3MDU4NzY5Ni91c2VyLXJ2YW5nZW50QGdvb2dsZS5jb20iLCJzZWxmTGluayI6Imh0dHBzOi8vd3d3Lmdvb2dsZWFwaXMuY29tL3N0b3JhZ2UvdjEvYi9nby1jbG91ZC1ibG9iLXRlc3QtYnVja2V0L28vd2VpcmQta2V5cyUxMCUxMSUxMiUxMyUxNCUxNSUxNiUxNyUxOCUxOSUxQSUxQiUxQyUxRCUxRSUxRi9hY2wvdXNlci1ydmFuZ2VudEBnb29nbGUuY29tIiwiYnVja2V0IjoiZ28tY2xvdWQtYmxvYi10ZXN0LWJ1Y2tldCIsImVudGl0eSI6InVzZXItcnZhbmdlbnRAZ29vZ2xlLmNvbSIsInJvbGUiOiJPV05FUiIsImVtYWlsIjoicnZhbmdlbnRAZ29vZ2xlLmNvbSIsImV0YWciOiJDTERxdis3MnN1MENFQUU9In1dLCJvd25lciI6eyJlbnRpdHkiOiJ1c2VyLXJ2YW5nZW50QGdvb2dsZS5jb20ifX0="
+        "Body": "eyJraW5kIjoic3RvcmFnZSNvYmplY3QiLCJpZCI6ImdvLWNsb3VkLWJsb2ItdGVzdC1idWNrZXQvd2VpcmQta2V5c1x1MDAxMFx1MDAxMVx1MDAxMlx1MDAxM1x1MDAxNFx1MDAxNVx1MDAxNlx1MDAxN1x1MDAxOFx1MDAxOVx1MDAxYVx1MDAxYlx1MDAxY1x1MDAxZFx1MDAxZVx1MDAxZi8xNzczOTMzOTE1MjM5MjkxIiwic2VsZkxpbmsiOiJodHRwczovL3d3dy5nb29nbGVhcGlzLmNvbS9zdG9yYWdlL3YxL2IvZ28tY2xvdWQtYmxvYi10ZXN0LWJ1Y2tldC9vL3dlaXJkLWtleXMlMTAlMTElMTIlMTMlMTQlMTUlMTYlMTclMTglMTklMUElMUIlMUMlMUQlMUUlMUYiLCJtZWRpYUxpbmsiOiJodHRwczovL3N0b3JhZ2UuZ29vZ2xlYXBpcy5jb20vZG93bmxvYWQvc3RvcmFnZS92MS9iL2dvLWNsb3VkLWJsb2ItdGVzdC1idWNrZXQvby93ZWlyZC1rZXlzJTEwJTExJTEyJTEzJTE0JTE1JTE2JTE3JTE4JTE5JTFBJTFCJTFDJTFEJTFFJTFGP2dlbmVyYXRpb249MTc3MzkzMzkxNTIzOTI5MSZhbHQ9bWVkaWEiLCJuYW1lIjoid2VpcmQta2V5c1x1MDAxMFx1MDAxMVx1MDAxMlx1MDAxM1x1MDAxNFx1MDAxNVx1MDAxNlx1MDAxN1x1MDAxOFx1MDAxOVx1MDAxYVx1MDAxYlx1MDAxY1x1MDAxZFx1MDAxZVx1MDAxZiIsImJ1Y2tldCI6ImdvLWNsb3VkLWJsb2ItdGVzdC1idWNrZXQiLCJnZW5lcmF0aW9uIjoiMTc3MzkzMzkxNTIzOTI5MSIsIm1ldGFnZW5lcmF0aW9uIjoiMSIsImNvbnRlbnRUeXBlIjoidGV4dC9wbGFpbjsgY2hhcnNldD11dGYtOCIsInN0b3JhZ2VDbGFzcyI6IlJFR0lPTkFMIiwic2l6ZSI6IjUiLCJtZDVIYXNoIjoiWFVGQUtyeExLbmE1Y1oyUkVCZkZrZz09IiwiY3JjMzJjIjoibW5HN1RBPT0iLCJldGFnIjoiQ1B2bS9lYWlySk1ERUFFPSIsInRpbWVDcmVhdGVkIjoiMjAyNi0wMy0xOVQxNToyNToxNS4yNDJaIiwidXBkYXRlZCI6IjIwMjYtMDMtMTlUMTU6MjU6MTUuMjQyWiIsInRpbWVTdG9yYWdlQ2xhc3NVcGRhdGVkIjoiMjAyNi0wMy0xOVQxNToyNToxNS4yNDJaIiwidGltZUZpbmFsaXplZCI6IjIwMjYtMDMtMTlUMTU6MjU6MTUuMjQyWiJ9"
       }
     },
     {
-      "ID": "57ee78f7e5910933",
+      "ID": "d4e7c9b1831f614a",
       "Request": {
         "Method": "GET",
         "URL": "https://storage.googleapis.com/go-cloud-blob-test-bucket/weird-keys%10%11%12%13%14%15%16%17%18%19%1A%1B%1C%1D%1E%1F?Expires=CLEARED\u0026GoogleAccessId=storage-updater%40go-cloud-test-216917.iam.gserviceaccount.com\u0026Signature=CLEARED",
@@ -273,7 +245,7 @@
             "gzip"
           ],
           "User-Agent": [
-            "Go-http-client/1.1"
+            "CLEARED"
           ]
         },
         "MediaType": "",
@@ -290,9 +262,6 @@
           "Accept-Ranges": [
             "bytes"
           ],
-          "Alt-Svc": [
-            "h3-29=\":443\"; ma=2592000,h3-T051=\":443\"; ma=2592000,h3-Q050=\":443\"; ma=2592000,h3-Q046=\":443\"; ma=2592000,h3-Q043=\":443\"; ma=2592000,quic=\":443\"; ma=2592000; v=\"46,43\""
-          ],
           "Cache-Control": [
             "private, max-age=0"
           ],
@@ -303,7 +272,7 @@
             "text/plain; charset=utf-8"
           ],
           "Date": [
-            "Thu, 03 Dec 2020 23:07:50 GMT"
+            "Thu, 19 Mar 2026 15:25:15 GMT"
           ],
           "Etag": [
             "\"5d41402abc4b2a76b9719d911017c592\""
@@ -312,13 +281,13 @@
             "CLEARED"
           ],
           "Last-Modified": [
-            "Thu, 03 Dec 2020 23:07:50 GMT"
+            "Thu, 19 Mar 2026 15:25:15 GMT"
           ],
           "Server": [
             "UploadServer"
           ],
           "X-Goog-Generation": [
-            "1607036870587696"
+            "1773933915239291"
           ],
           "X-Goog-Hash": [
             "crc32c=mnG7TA==",
@@ -336,33 +305,169 @@
           "X-Goog-Stored-Content-Length": [
             "5"
           ],
-          "X-Guploader-Customer": [
-            "cloud-storage"
-          ],
-          "X-Guploader-Request-Result": [
-            "success"
-          ],
-          "X-Guploader-Upload-Result": [
-            "success"
-          ],
           "X-Guploader-Uploadid": [
-            "ABg5-UwJOKFeSClt8GO-6bzr-cqaqUBKPnmlwoTOX9PoPult_DOSQ8J5210rdSRWchek2UmjqjEalimeghqSZEmfp50"
+            "AGQBYWw0RQ5nOgoh7mpS5OIJkHm6GnntNgvaBmSAM5VADL4wfRietJe4gGZwxtZvyfdZKuq_"
           ]
         },
         "Body": "aGVsbG8="
       }
     },
     {
-      "ID": "6a5a0cf6637797a0",
+      "ID": "85ca2e7dbb8c86c3",
       "Request": {
-        "Method": "DELETE",
-        "URL": "https://storage.googleapis.com/storage/v1/b/go-cloud-blob-test-bucket/o/weird-keys%10%11%12%13%14%15%16%17%18%19%1A%1B%1C%1D%1E%1F?alt=json\u0026prettyPrint=false",
+        "Method": "POST",
+        "URL": "https://storage.googleapis.com/storage/v1/b/go-cloud-blob-test-bucket/o/weird-keys%10%11%12%13%14%15%16%17%18%19%1A%1B%1C%1D%1E%1F/rewriteTo/b/go-cloud-blob-test-bucket/o/weird-keys%10%11%12%13%14%15%16%17%18%19%1A%1B%1C%1D%1E%1F-copy?alt=json\u0026prettyPrint=false\u0026projection=full",
+        "Header": {
+          "Accept-Encoding": [
+            "gzip"
+          ],
+          "Content-Length": [
+            "3"
+          ],
+          "User-Agent": [
+            "CLEARED"
+          ],
+          "X-Goog-Gcs-Idempotency-Token": [
+            "CLEARED"
+          ]
+        },
+        "MediaType": "application/json",
+        "BodyParts": [
+          "e30K"
+        ]
+      },
+      "Response": {
+        "StatusCode": 200,
+        "Proto": "HTTP/1.1",
+        "ProtoMajor": 1,
+        "ProtoMinor": 1,
+        "Header": {
+          "Cache-Control": [
+            "no-cache, no-store, max-age=0, must-revalidate"
+          ],
+          "Content-Length": [
+            "1177"
+          ],
+          "Content-Type": [
+            "application/json; charset=UTF-8"
+          ],
+          "Date": [
+            "Thu, 19 Mar 2026 15:25:15 GMT"
+          ],
+          "Expires": [
+            "CLEARED"
+          ],
+          "Pragma": [
+            "no-cache"
+          ],
+          "Server": [
+            "UploadServer"
+          ],
+          "Vary": [
+            "Origin",
+            "X-Origin"
+          ],
+          "X-Guploader-Uploadid": [
+            "AGQBYWz4RsMG19MbXtOwDhSbKVKn22wl8cEGC7IAe99yPU_rEjeoH9p8l16xXsUc7zyUb-kG"
+          ]
+        },
+        "Body": "eyJraW5kIjoic3RvcmFnZSNyZXdyaXRlUmVzcG9uc2UiLCJ0b3RhbEJ5dGVzUmV3cml0dGVuIjoiNSIsIm9iamVjdFNpemUiOiI1IiwiZG9uZSI6dHJ1ZSwicmVzb3VyY2UiOnsia2luZCI6InN0b3JhZ2Ujb2JqZWN0IiwiaWQiOiJnby1jbG91ZC1ibG9iLXRlc3QtYnVja2V0L3dlaXJkLWtleXNcdTAwMTBcdTAwMTFcdTAwMTJcdTAwMTNcdTAwMTRcdTAwMTVcdTAwMTZcdTAwMTdcdTAwMThcdTAwMTlcdTAwMWFcdTAwMWJcdTAwMWNcdTAwMWRcdTAwMWVcdTAwMWYtY29weS8xNzczOTMzOTE1NTcwMjUwIiwic2VsZkxpbmsiOiJodHRwczovL3d3dy5nb29nbGVhcGlzLmNvbS9zdG9yYWdlL3YxL2IvZ28tY2xvdWQtYmxvYi10ZXN0LWJ1Y2tldC9vL3dlaXJkLWtleXMlMTAlMTElMTIlMTMlMTQlMTUlMTYlMTclMTglMTklMUElMUIlMUMlMUQlMUUlMUYtY29weSIsIm1lZGlhTGluayI6Imh0dHBzOi8vc3RvcmFnZS5nb29nbGVhcGlzLmNvbS9kb3dubG9hZC9zdG9yYWdlL3YxL2IvZ28tY2xvdWQtYmxvYi10ZXN0LWJ1Y2tldC9vL3dlaXJkLWtleXMlMTAlMTElMTIlMTMlMTQlMTUlMTYlMTclMTglMTklMUElMUIlMUMlMUQlMUUlMUYtY29weT9nZW5lcmF0aW9uPTE3NzM5MzM5MTU1NzAyNTAmYWx0PW1lZGlhIiwibmFtZSI6IndlaXJkLWtleXNcdTAwMTBcdTAwMTFcdTAwMTJcdTAwMTNcdTAwMTRcdTAwMTVcdTAwMTZcdTAwMTdcdTAwMThcdTAwMTlcdTAwMWFcdTAwMWJcdTAwMWNcdTAwMWRcdTAwMWVcdTAwMWYtY29weSIsImJ1Y2tldCI6ImdvLWNsb3VkLWJsb2ItdGVzdC1idWNrZXQiLCJnZW5lcmF0aW9uIjoiMTc3MzkzMzkxNTU3MDI1MCIsIm1ldGFnZW5lcmF0aW9uIjoiMSIsImNvbnRlbnRUeXBlIjoidGV4dC9wbGFpbjsgY2hhcnNldD11dGYtOCIsInN0b3JhZ2VDbGFzcyI6IlJFR0lPTkFMIiwic2l6ZSI6IjUiLCJtZDVIYXNoIjoiWFVGQUtyeExLbmE1Y1oyUkVCZkZrZz09IiwiY3JjMzJjIjoibW5HN1RBPT0iLCJldGFnIjoiQ01xQWt1ZWlySk1ERUFFPSIsInRpbWVDcmVhdGVkIjoiMjAyNi0wMy0xOVQxNToyNToxNS41NzJaIiwidXBkYXRlZCI6IjIwMjYtMDMtMTlUMTU6MjU6MTUuNTcyWiIsInRpbWVTdG9yYWdlQ2xhc3NVcGRhdGVkIjoiMjAyNi0wMy0xOVQxNToyNToxNS41NzJaIiwidGltZUZpbmFsaXplZCI6IjIwMjYtMDMtMTlUMTU6MjU6MTUuNTcyWiJ9fQ=="
+      }
+    },
+    {
+      "ID": "2770006631fe2b2d",
+      "Request": {
+        "Method": "GET",
+        "URL": "https://storage.googleapis.com/go-cloud-blob-test-bucket/weird-keys%10%11%12%13%14%15%16%17%18%19%1A%1B%1C%1D%1E%1F-copy",
         "Header": {
           "Accept-Encoding": [
             "gzip"
           ],
           "User-Agent": [
-            "google-api-go-client/0.5 go-cloud/blob/0.1.0"
+            "CLEARED"
+          ],
+          "X-Goog-Gcs-Idempotency-Token": [
+            "CLEARED"
+          ]
+        },
+        "MediaType": "",
+        "BodyParts": [
+          ""
+        ]
+      },
+      "Response": {
+        "StatusCode": 200,
+        "Proto": "HTTP/1.1",
+        "ProtoMajor": 1,
+        "ProtoMinor": 1,
+        "Header": {
+          "Accept-Ranges": [
+            "bytes"
+          ],
+          "Cache-Control": [
+            "private, max-age=0"
+          ],
+          "Content-Length": [
+            "5"
+          ],
+          "Content-Type": [
+            "text/plain; charset=utf-8"
+          ],
+          "Date": [
+            "Thu, 19 Mar 2026 15:25:15 GMT"
+          ],
+          "Etag": [
+            "\"5d41402abc4b2a76b9719d911017c592\""
+          ],
+          "Expires": [
+            "CLEARED"
+          ],
+          "Last-Modified": [
+            "Thu, 19 Mar 2026 15:25:15 GMT"
+          ],
+          "Server": [
+            "UploadServer"
+          ],
+          "X-Goog-Generation": [
+            "1773933915570250"
+          ],
+          "X-Goog-Hash": [
+            "crc32c=mnG7TA==",
+            "md5=XUFAKrxLKna5cZ2REBfFkg=="
+          ],
+          "X-Goog-Metageneration": [
+            "1"
+          ],
+          "X-Goog-Storage-Class": [
+            "REGIONAL"
+          ],
+          "X-Goog-Stored-Content-Encoding": [
+            "identity"
+          ],
+          "X-Goog-Stored-Content-Length": [
+            "5"
+          ],
+          "X-Guploader-Uploadid": [
+            "AGQBYWywTlDI2k8cFPME3VEWpxZzJRWWeiJSJwAiuYQJUwJ6gkmAvIHDCD9eVIELAPm5D298"
+          ]
+        },
+        "Body": "aGVsbG8="
+      }
+    },
+    {
+      "ID": "5b0d2939ce402a7b",
+      "Request": {
+        "Method": "DELETE",
+        "URL": "https://storage.googleapis.com/storage/v1/b/go-cloud-blob-test-bucket/o/weird-keys%10%11%12%13%14%15%16%17%18%19%1A%1B%1C%1D%1E%1F-copy?alt=json\u0026prettyPrint=false",
+        "Header": {
+          "Accept-Encoding": [
+            "gzip"
+          ],
+          "User-Agent": [
+            "CLEARED"
+          ],
+          "X-Goog-Gcs-Idempotency-Token": [
+            "CLEARED"
           ]
         },
         "MediaType": "",
@@ -376,9 +481,6 @@
         "ProtoMajor": 1,
         "ProtoMinor": 1,
         "Header": {
-          "Alt-Svc": [
-            "h3-29=\":443\"; ma=2592000,h3-T051=\":443\"; ma=2592000,h3-Q050=\":443\"; ma=2592000,h3-Q046=\":443\"; ma=2592000,h3-Q043=\":443\"; ma=2592000,quic=\":443\"; ma=2592000; v=\"46,43\""
-          ],
           "Cache-Control": [
             "no-cache, no-store, max-age=0, must-revalidate"
           ],
@@ -389,7 +491,7 @@
             "application/json"
           ],
           "Date": [
-            "Thu, 03 Dec 2020 23:07:50 GMT"
+            "Thu, 19 Mar 2026 15:25:15 GMT"
           ],
           "Expires": [
             "CLEARED"
@@ -404,17 +506,67 @@
             "Origin",
             "X-Origin"
           ],
-          "X-Guploader-Customer": [
-            "apiary_cloudstorage_metadata"
+          "X-Guploader-Uploadid": [
+            "AGQBYWwuPslEiVe978VwPLyJNrL9DhqYd4KNi_xOGzjmYypG8_WnbEIafyfTImq5ivXdsrYM"
+          ]
+        },
+        "Body": ""
+      }
+    },
+    {
+      "ID": "07fec27d723e0e9a",
+      "Request": {
+        "Method": "DELETE",
+        "URL": "https://storage.googleapis.com/storage/v1/b/go-cloud-blob-test-bucket/o/weird-keys%10%11%12%13%14%15%16%17%18%19%1A%1B%1C%1D%1E%1F?alt=json\u0026prettyPrint=false",
+        "Header": {
+          "Accept-Encoding": [
+            "gzip"
           ],
-          "X-Guploader-Request-Result": [
-            "success"
+          "User-Agent": [
+            "CLEARED"
           ],
-          "X-Guploader-Upload-Result": [
-            "success"
+          "X-Goog-Gcs-Idempotency-Token": [
+            "CLEARED"
+          ]
+        },
+        "MediaType": "",
+        "BodyParts": [
+          ""
+        ]
+      },
+      "Response": {
+        "StatusCode": 204,
+        "Proto": "HTTP/1.1",
+        "ProtoMajor": 1,
+        "ProtoMinor": 1,
+        "Header": {
+          "Cache-Control": [
+            "no-cache, no-store, max-age=0, must-revalidate"
+          ],
+          "Content-Length": [
+            "0"
+          ],
+          "Content-Type": [
+            "application/json"
+          ],
+          "Date": [
+            "Thu, 19 Mar 2026 15:25:15 GMT"
+          ],
+          "Expires": [
+            "CLEARED"
+          ],
+          "Pragma": [
+            "no-cache"
+          ],
+          "Server": [
+            "UploadServer"
+          ],
+          "Vary": [
+            "Origin",
+            "X-Origin"
           ],
           "X-Guploader-Uploadid": [
-            "ABg5-Uz6bFhQGzx92U-GzUQtOd7ek6PEjwQssDdlW9aptCDU4757CJQmLtaOf6i_-sD6AZXEfi4A6XzvVIR3gV3Cq-U"
+            "AGQBYWzHcGPjg5_6lYeRUpFb-lbZ-dZZxLQRHgAetqA9spYNeVN-r6Py0Kbkh2Ft49_FezKw"
           ]
         },
         "Body": ""

@@ -1,10 +1,13 @@
 {
-  "Initial": "AQAAAA7XW2bxKibKo/4g",
+  "Initial": "AQAAAA7hsRhsEG1fBAAA",
   "Version": "0.2",
   "Converter": {
-    "ScrubBody": null,
+    "ScrubBody": [
+      "MessageAttributes.*"
+    ],
     "ClearHeaders": [
       "^X-Goog-.*Encryption-Key$",
+      "^Amz-Sdk-Invocation-Id$",
       "^X-Amz-Date$",
       "^User-Agent$"
     ],
@@ -41,16 +44,25 @@
   },
   "Entries": [
     {
-      "ID": "182652b6118e37fb",
+      "ID": "83b3254c452f03c0",
       "Request": {
         "Method": "GET",
-        "URL": "https://go-cloud-testing.s3.us-west-1.amazonaws.com/blob-for-canceled-write",
+        "URL": "https://go-cloud-testing-2.s3.us-west-1.amazonaws.com/blob-for-canceled-write?x-id=GetObject",
         "Header": {
           "Accept-Encoding": [
-            "gzip"
+            "identity"
+          ],
+          "Amz-Sdk-Invocation-Id": [
+            "CLEARED"
+          ],
+          "Amz-Sdk-Request": [
+            "attempt=1; max=1"
           ],
           "User-Agent": [
             "CLEARED"
+          ],
+          "X-Amz-Checksum-Mode": [
+            "ENABLED"
           ],
           "X-Amz-Content-Sha256": [
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -61,7 +73,7 @@
         },
         "MediaType": "",
         "BodyParts": [
-          ""
+          null
         ]
       },
       "Response": {
@@ -74,32 +86,41 @@
             "application/xml"
           ],
           "Date": [
-            "Thu, 03 Dec 2020 23:08:32 GMT"
+            "Tue, 02 Jun 2026 18:31:08 GMT"
           ],
           "Server": [
             "AmazonS3"
           ],
           "X-Amz-Id-2": [
-            "xunwrvLM7ejbQCfHuGexMDzasGVoasRiU5PKWCSi1Sn2ie1PRBzHfSI3LQ9HcbVI+nCt35Azz7c="
+            "mEwHwGgBB9kHtp8lvS+7UpaawywdQ3Xi1nkDh1huyHTmohO3VEBxVB1Tqr6nH5vS+sS8Dvng4RWzE1LrMOZXXUTYGEYAUgiK"
           ],
           "X-Amz-Request-Id": [
-            "4EAC18662E37AF10"
+            "W44SW2NPYZ6T489G"
           ]
         },
-        "Body": "PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4KPEVycm9yPjxDb2RlPk5vU3VjaEtleTwvQ29kZT48TWVzc2FnZT5UaGUgc3BlY2lmaWVkIGtleSBkb2VzIG5vdCBleGlzdC48L01lc3NhZ2U+PEtleT5ibG9iLWZvci1jYW5jZWxlZC13cml0ZTwvS2V5PjxSZXF1ZXN0SWQ+NEVBQzE4NjYyRTM3QUYxMDwvUmVxdWVzdElkPjxIb3N0SWQ+eHVud3J2TE03ZWpiUUNmSHVHZXhNRHphc0dWb2FzUmlVNVBLV0NTaTFTbjJpZTFQUkJ6SGZTSTNMUTlIY2JWSStuQ3QzNUF6ejdjPTwvSG9zdElkPjwvRXJyb3I+"
+        "Body": "PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4KPEVycm9yPjxDb2RlPk5vU3VjaEtleTwvQ29kZT48TWVzc2FnZT5UaGUgc3BlY2lmaWVkIGtleSBkb2VzIG5vdCBleGlzdC48L01lc3NhZ2U+PEtleT5ibG9iLWZvci1jYW5jZWxlZC13cml0ZTwvS2V5PjxSZXF1ZXN0SWQ+VzQ0U1cyTlBZWjZUNDg5RzwvUmVxdWVzdElkPjxIb3N0SWQ+bUV3SHdHZ0JCOWtIdHA4bHZTKzdVcGFhd3l3ZFEzWGkxbmtEaDFodXlIVG1vaE8zVkVCeFZCMVRxcjZuSDV2UytzUzhEdm5nNFJXekUxTHJNT1pYWFVUWUdFWUFVZ2lLPC9Ib3N0SWQ+PC9FcnJvcj4="
       }
     },
     {
-      "ID": "f22de6ac3a6e3d7a",
+      "ID": "823cea2aaa34fd8d",
       "Request": {
         "Method": "GET",
-        "URL": "https://go-cloud-testing.s3.us-west-1.amazonaws.com/blob-for-canceled-write",
+        "URL": "https://go-cloud-testing-2.s3.us-west-1.amazonaws.com/blob-for-canceled-write?x-id=GetObject",
         "Header": {
           "Accept-Encoding": [
-            "gzip"
+            "identity"
+          ],
+          "Amz-Sdk-Invocation-Id": [
+            "CLEARED"
+          ],
+          "Amz-Sdk-Request": [
+            "attempt=1; max=1"
           ],
           "User-Agent": [
             "CLEARED"
+          ],
+          "X-Amz-Checksum-Mode": [
+            "ENABLED"
           ],
           "X-Amz-Content-Sha256": [
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -110,7 +131,7 @@
         },
         "MediaType": "",
         "BodyParts": [
-          ""
+          null
         ]
       },
       "Response": {
@@ -123,19 +144,19 @@
             "application/xml"
           ],
           "Date": [
-            "Thu, 03 Dec 2020 23:08:32 GMT"
+            "Tue, 02 Jun 2026 18:31:08 GMT"
           ],
           "Server": [
             "AmazonS3"
           ],
           "X-Amz-Id-2": [
-            "9rZS6d9rPKeOs9hB16GWjOXxbLIIV3tKfANBrxE/lGA9dmiR6v+r6hpPKOV4EOip6pNqDqZfsBU="
+            "XhkJ8+y4R8qJSo6fKw3oK/QUDZLMKDvJWx1yS24lxj8ylvTu3VRaAyydlvkzEGitPgaqNucDwUu0HP5ZXlMfqhzxH4lwyM5c"
           ],
           "X-Amz-Request-Id": [
-            "0A1C0D1052319000"
+            "W44Q073S5MMHDRQR"
           ]
         },
-        "Body": "PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4KPEVycm9yPjxDb2RlPk5vU3VjaEtleTwvQ29kZT48TWVzc2FnZT5UaGUgc3BlY2lmaWVkIGtleSBkb2VzIG5vdCBleGlzdC48L01lc3NhZ2U+PEtleT5ibG9iLWZvci1jYW5jZWxlZC13cml0ZTwvS2V5PjxSZXF1ZXN0SWQ+MEExQzBEMTA1MjMxOTAwMDwvUmVxdWVzdElkPjxIb3N0SWQ+OXJaUzZkOXJQS2VPczloQjE2R1dqT1h4YkxJSVYzdEtmQU5CcnhFL2xHQTlkbWlSNnYrcjZocFBLT1Y0RU9pcDZwTnFEcVpmc0JVPTwvSG9zdElkPjwvRXJyb3I+"
+        "Body": "PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4KPEVycm9yPjxDb2RlPk5vU3VjaEtleTwvQ29kZT48TWVzc2FnZT5UaGUgc3BlY2lmaWVkIGtleSBkb2VzIG5vdCBleGlzdC48L01lc3NhZ2U+PEtleT5ibG9iLWZvci1jYW5jZWxlZC13cml0ZTwvS2V5PjxSZXF1ZXN0SWQ+VzQ0UTA3M1M1TU1IRFJRUjwvUmVxdWVzdElkPjxIb3N0SWQ+WGhrSjgreTRSOHFKU282Zkt3M29LL1FVRFpMTUtEdkpXeDF5UzI0bHhqOHlsdlR1M1ZSYUF5eWRsdmt6RUdpdFBnYXFOdWNEd1V1MEhQNVpYbE1mcWh6eEg0bHd5TTVjPC9Ib3N0SWQ+PC9FcnJvcj4="
       }
     }
   ]

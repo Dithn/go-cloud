@@ -18,14 +18,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
+	"net/url"
 	"testing"
 
-	kmsv2 "github.com/aws/aws-sdk-go-v2/service/kms"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/kms"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/kms"
+	"github.com/aws/aws-sdk-go-v2/service/kms/types"
 	"github.com/aws/smithy-go"
+	"github.com/google/go-cmp/cmp"
 	"gocloud.dev/internal/testing/setup"
 	"gocloud.dev/secrets"
 	"gocloud.dev/secrets/driver"
@@ -39,48 +39,84 @@ const (
 )
 
 type harness struct {
-	useV2    bool
-	client   *kms.KMS
-	clientV2 *kmsv2.Client
-	close    func()
+	client *kms.Client
+	close  func()
 }
 
 func (h *harness) MakeDriver(ctx context.Context) (driver.Keeper, driver.Keeper, error) {
-	return &keeper{useV2: h.useV2, keyID: keyID1, client: h.client, clientV2: h.clientV2}, &keeper{useV2: h.useV2, keyID: keyID2, client: h.client, clientV2: h.clientV2}, nil
+	return &keeper{keyID: keyID1, client: h.client}, &keeper{keyID: keyID2, client: h.client}, nil
 }
 
 func (h *harness) Close() {
 	h.close()
 }
 
+// Lists all existing aliases in the account, to see if we need to create one.
+func listExistingAliases(ctx context.Context, client *kms.Client) (map[string]bool, error) {
+	existing := map[string]bool{}
+	var nextMarker *string
+	for {
+		resp, err := client.ListAliases(ctx, &kms.ListAliasesInput{Marker: nextMarker})
+		if err != nil {
+			return nil, fmt.Errorf("failed to list aliases: %w", err)
+		}
+		for _, alias := range resp.Aliases {
+			existing[*alias.AliasName] = true
+		}
+		if !resp.Truncated {
+			break
+		}
+		nextMarker = resp.NextMarker
+	}
+	return existing, nil
+}
+
+func createKey(ctx context.Context, client *kms.Client, keyID string) error {
+	createKeyResult, err := client.CreateKey(ctx, &kms.CreateKeyInput{})
+	if err != nil {
+		return fmt.Errorf("failed to create key %q: %w", keyID, err)
+	}
+	if _, err := client.CreateAlias(ctx, &kms.CreateAliasInput{
+		AliasName:   aws.String(keyID),
+		TargetKeyId: createKeyResult.KeyMetadata.KeyId,
+	}); err != nil {
+		return fmt.Errorf("failed to create alias for key %q: %w", keyID, err)
+	}
+	return nil
+}
+
 func newHarness(ctx context.Context, t *testing.T) (drivertest.Harness, error) {
-	sess, _, done, _ := setup.NewAWSSession(ctx, t, region)
+	t.Helper()
+
+	cfg, _, done, _ := setup.NewAWSv2Config(ctx, t, region, false)
+	client := kms.NewFromConfig(cfg)
+
+	// Create the keys we need if they don't exist.
+	existing, err := listExistingAliases(ctx, client)
+	if err != nil {
+		return nil, err
+	}
+	if !existing[keyID1] {
+		if err := createKey(ctx, client, keyID1); err != nil {
+			return nil, err
+		}
+	}
+	if !existing[keyID2] {
+		if err := createKey(ctx, client, keyID2); err != nil {
+			return nil, err
+		}
+	}
 	return &harness{
-		useV2:  false,
-		client: kms.New(sess),
+		client: client,
 		close:  done,
 	}, nil
 }
 
-func newHarnessV2(ctx context.Context, t *testing.T) (drivertest.Harness, error) {
-	cfg, _, done, _ := setup.NewAWSv2Config(ctx, t, region)
-	return &harness{
-		useV2:    true,
-		clientV2: kmsv2.NewFromConfig(cfg),
-		close:    done,
-	}, nil
-}
-
 func TestConformance(t *testing.T) {
-	drivertest.RunConformanceTests(t, newHarness, []drivertest.AsTest{verifyAs{v2: false}})
-}
-
-func TestConformanceV2(t *testing.T) {
-	drivertest.RunConformanceTests(t, newHarnessV2, []drivertest.AsTest{verifyAs{v2: true}})
+	drivertest.RunConformanceTests(t, newHarness, []drivertest.AsTest{verifyAs{}})
 }
 
 type verifyAs struct {
-	v2 bool
 }
 
 func (v verifyAs) Name() string {
@@ -88,60 +124,62 @@ func (v verifyAs) Name() string {
 }
 
 func (v verifyAs) ErrorCheck(k *secrets.Keeper, err error) error {
-	var code string
-	if v.v2 {
-		var e smithy.APIError
-		if !k.ErrorAs(err, &e) {
-			return errors.New("Keeper.ErrorAs failed")
-		}
-		code = e.ErrorCode()
-	} else {
-		var e awserr.Error
-		if !k.ErrorAs(err, &e) {
-			return errors.New("Keeper.ErrorAs failed")
-		}
-		code = e.Code()
+	var e smithy.APIError
+	if !k.ErrorAs(err, &e) {
+		return errors.New("Keeper.ErrorAs failed")
 	}
-	if code != kms.ErrCodeInvalidCiphertextException {
-		return fmt.Errorf("got %q, want %q", code, kms.ErrCodeInvalidCiphertextException)
+	if !errors.As(err, &e) {
+		return errors.New("errors.As failed")
+	}
+	code := e.ErrorCode()
+	want := (&types.InvalidCiphertextException{}).ErrorCode()
+	if code != want {
+		return fmt.Errorf("got %q, want %q", code, want)
 	}
 	return nil
 }
 
 // KMS-specific tests.
 
-func TestNoSessionProvidedError(t *testing.T) {
-	if _, err := Dial(nil); err == nil {
-		t.Error("got nil, want no AWS session provided")
+func TestEncryptionContext(t *testing.T) {
+	tests := []struct {
+		Existing map[string]string
+		URL      string
+		WantErr  bool
+		Want     map[string]string
+	}{
+		// None before or after.
+		{nil, "http://foo", false, nil},
+		// New parameter.
+		{nil, "http://foo?context_foo=bar", false, map[string]string{"foo": "bar"}},
+		// 2 new parameters.
+		{nil, "http://foo?context_foo=bar&context_abc=baz", false, map[string]string{"foo": "bar", "abc": "baz"}},
+		// Multiple values.
+		{nil, "http://foo?context_foo=bar&context_foo=baz", true, nil},
+		// Existing, no new.
+		{map[string]string{"foo": "bar"}, "http://foo", false, map[string]string{"foo": "bar"}},
+		// No-conflict merge.
+		{map[string]string{"foo": "bar"}, "http://foo?context_abc=baz", false, map[string]string{"foo": "bar", "abc": "baz"}},
+		// Overwrite merge.
+		{map[string]string{"foo": "bar"}, "http://foo?context_foo=baz", false, map[string]string{"foo": "baz"}},
 	}
-}
-
-func TestNoConnectionError(t *testing.T) {
-	prevAccessKey := os.Getenv("AWS_ACCESS_KEY")
-	prevSecretKey := os.Getenv("AWS_SECRET_KEY")
-	prevRegion := os.Getenv("AWS_REGION")
-	os.Setenv("AWS_ACCESS_KEY", "myaccesskey")
-	os.Setenv("AWS_SECRET_KEY", "mysecretkey")
-	os.Setenv("AWS_REGION", "us-east-1")
-	defer func() {
-		os.Setenv("AWS_ACCESS_KEY", prevAccessKey)
-		os.Setenv("AWS_SECRET_KEY", prevSecretKey)
-		os.Setenv("AWS_REGION", prevRegion)
-	}()
-	sess, err := session.NewSession()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	client, err := Dial(sess)
-	if err != nil {
-		t.Fatal(err)
-	}
-	keeper := OpenKeeper(client, keyID1, nil)
-	defer keeper.Close()
-
-	if _, err := keeper.Encrypt(context.Background(), []byte("test")); err == nil {
-		t.Error("got nil, want UnrecognizedClientException")
+	for _, test := range tests {
+		t.Run(fmt.Sprintf("existing %v URL %v", test.Existing, test.URL), func(t *testing.T) {
+			opts := KeeperOptions{
+				EncryptionContext: test.Existing,
+			}
+			u, err := url.Parse(test.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = addEncryptionContextFromURLParams(&opts, u.Query())
+			if (err != nil) != test.WantErr {
+				t.Fatalf("got err %v, want error? %v", err, test.WantErr)
+			}
+			if diff := cmp.Diff(opts.EncryptionContext, test.Want); diff != "" {
+				t.Errorf("diff %v", diff)
+			}
+		})
 	}
 }
 
@@ -158,10 +196,10 @@ func TestOpenKeeper(t *testing.T) {
 		{"awskms:///arn:aws:kms:us-east-1:932528106278:key/8be0dcc5-da0a-4164-a99f-649015e344b5", false},
 		// OK, overriding region.
 		{"awskms://alias/my-key?region=us-west1", false},
-		// OK, using V1.
-		{"awskms://alias/my-key?awssdk=v1", false},
-		// OK, using V2.
-		{"awskms://alias/my-key?awssdk=v2", false},
+		// OK, adding EncryptionContext.
+		{"awskms://alias/my-key?context_abc=foo&context_def=bar", false},
+		// Multiple values for an EncryptionContext.
+		{"awskms://alias/my-key?context_abc=foo&context_abc=bar", true},
 		// Unknown parameter.
 		{"awskms://alias/my-key?param=value", true},
 	}

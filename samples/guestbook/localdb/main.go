@@ -19,7 +19,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
@@ -54,6 +53,7 @@ func runLocalDB(containerName, guestbookDir string) error {
 		dockerArgs = append(dockerArgs, "--name", containerName)
 	}
 	dockerArgs = append(dockerArgs,
+		"--platform", "linux/amd64",
 		"--env", "MYSQL_DATABASE=guestbook",
 		"--env", "MYSQL_ROOT_PASSWORD=password",
 		"--detach",
@@ -63,7 +63,7 @@ func runLocalDB(containerName, guestbookDir string) error {
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return fmt.Errorf("running %v: %v: %s", cmd.Args, err, out)
+		return fmt.Errorf("running %v: %w: %s", cmd.Args, err, out)
 	}
 	containerID := strings.TrimSpace(string(out))
 	defer func() {
@@ -95,13 +95,13 @@ func runLocalDB(containerName, guestbookDir string) error {
 	}
 
 	log.Printf("Initializing database schema and users")
-	schema, err := ioutil.ReadFile(filepath.Join(guestbookDir, "schema.sql"))
+	schema, err := os.ReadFile(filepath.Join(guestbookDir, "schema.sql"))
 	if err != nil {
-		return fmt.Errorf("reading schema: %v", err)
+		return fmt.Errorf("reading schema: %w", err)
 	}
-	roles, err := ioutil.ReadFile(filepath.Join(guestbookDir, "roles.sql"))
+	roles, err := os.ReadFile(filepath.Join(guestbookDir, "roles.sql"))
 	if err != nil {
-		return fmt.Errorf("reading roles: %v", err)
+		return fmt.Errorf("reading roles: %w", err)
 	}
 	tooMany := 10
 	var i int
@@ -131,7 +131,7 @@ func runLocalDB(containerName, guestbookDir string) error {
 	attach.Stdout = os.Stdout
 	attach.Stderr = os.Stderr
 	if err := attach.Run(); err != nil {
-		return fmt.Errorf("running %v: %q", attach.Args, err)
+		return fmt.Errorf("running %v: %w", attach.Args, err)
 	}
 
 	return nil

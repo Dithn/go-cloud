@@ -16,7 +16,7 @@
 // variables read from a blob.Bucket.
 // Use OpenVariable to construct a *runtimevar.Variable.
 //
-// URLs
+// # URLs
 //
 // For runtimevar.OpenVariable, blobvar registers for the scheme "blob".
 // The default URL opener will open a blob.Bucket based on the environment
@@ -25,11 +25,11 @@
 // see URLOpener.
 // See https://gocloud.dev/concepts/urls/ for background information.
 //
-// As
+// # As
 //
 // blobvar exposes the following types for As:
-//  - Snapshot: Not supported.
-//  - Error: error, which can be passed to blob.ErrorAs.
+//   - Snapshot: Not supported.
+//   - Error: error, which can be passed to blob.ErrorAs.
 package blobvar // import "gocloud.dev/runtimevar/blobvar"
 
 import (
@@ -68,13 +68,13 @@ func (o *defaultOpener) OpenVariableURL(ctx context.Context, u *url.URL) (*runti
 		}
 		bucket, err := blob.OpenBucket(ctx, bucketURL)
 		if err != nil {
-			o.err = fmt.Errorf("failed to open default bucket %q: %v", bucketURL, err)
+			o.err = fmt.Errorf("failed to open default bucket %q: %w", bucketURL, err)
 			return
 		}
 		o.opener = &URLOpener{Bucket: bucket}
 	})
 	if o.err != nil {
-		return nil, fmt.Errorf("open variable %v: %v", u, o.err)
+		return nil, fmt.Errorf("open variable %v: %w", u, o.err)
 	}
 	return o.opener.OpenVariableURL(ctx, u)
 }
@@ -85,8 +85,10 @@ const Scheme = "blob"
 // URLOpener opens blob-backed URLs like "blob://myblobkey?decoder=string".
 // It supports the following URL parameters:
 //   - decoder: The decoder to use. Defaults to URLOpener.Decoder, or
-//       runtimevar.BytesDecoder if URLOpener.Decoder is nil.
-//       See runtimevar.DecoderByName for supported values.
+//     runtimevar.BytesDecoder if URLOpener.Decoder is nil.
+//     See runtimevar.DecoderByName for supported values.
+//   - wait: The poll interval, in time.ParseDuration formats.
+//     Defaults to 30s.
 type URLOpener struct {
 	// Bucket is required.
 	Bucket *blob.Bucket
@@ -112,13 +114,22 @@ func (o *URLOpener) OpenVariableURL(ctx context.Context, u *url.URL) (*runtimeva
 	q.Del("decoder")
 	decoder, err := runtimevar.DecoderByName(ctx, decoderName, o.Decoder)
 	if err != nil {
-		return nil, fmt.Errorf("open variable %v: invalid decoder: %v", u, err)
+		return nil, fmt.Errorf("open variable %v: invalid decoder: %w", u, err)
 	}
 
+	opts := o.Options
+	if s := q.Get("wait"); s != "" {
+		q.Del("wait")
+		d, err := time.ParseDuration(s)
+		if err != nil {
+			return nil, fmt.Errorf("open variable %v: invalid wait %q: %w", u, s, err)
+		}
+		opts.WaitDuration = d
+	}
 	for param := range q {
 		return nil, fmt.Errorf("open variable %v: invalid query parameter %q", u, param)
 	}
-	return OpenVariable(o.Bucket, path.Join(u.Host, u.Path), decoder, &o.Options)
+	return OpenVariable(o.Bucket, path.Join(u.Host, u.Path), decoder, &opts)
 }
 
 // Options sets options.
@@ -151,14 +162,14 @@ func newWatcher(bucket *blob.Bucket, key string, decoder *runtimevar.Decoder, op
 
 // state implements driver.State.
 type state struct {
-	val        interface{}
+	val        any
 	updateTime time.Time
 	rawBytes   []byte
 	err        error
 }
 
 // Value implements driver.State.Value.
-func (s *state) Value() (interface{}, error) {
+func (s *state) Value() (any, error) {
 	return s.val, s.err
 }
 
@@ -168,7 +179,7 @@ func (s *state) UpdateTime() time.Time {
 }
 
 // As implements driver.State.As.
-func (s *state) As(i interface{}) bool {
+func (s *state) As(i any) bool {
 	return false
 }
 
@@ -230,7 +241,7 @@ func (w *watcher) Close() error {
 // ErrorAs implements driver.ErrorAs.
 // Since blobvar uses the blob package, ErrorAs delegates
 // to the bucket's ErrorAs method.
-func (w *watcher) ErrorAs(err error, i interface{}) bool {
+func (w *watcher) ErrorAs(err error, i any) bool {
 	return w.bucket.ErrorAs(err, i)
 }
 

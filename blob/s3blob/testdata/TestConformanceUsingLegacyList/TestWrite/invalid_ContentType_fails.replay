@@ -1,10 +1,13 @@
 {
-  "Initial": "AQAAAA7XW2bwFfCat/4g",
+  "Initial": "AQAAAA7hsRhqA04/SAAA",
   "Version": "0.2",
   "Converter": {
-    "ScrubBody": null,
+    "ScrubBody": [
+      "MessageAttributes.*"
+    ],
     "ClearHeaders": [
       "^X-Goog-.*Encryption-Key$",
+      "^Amz-Sdk-Invocation-Id$",
       "^X-Amz-Date$",
       "^User-Agent$"
     ],
@@ -41,16 +44,25 @@
   },
   "Entries": [
     {
-      "ID": "03661e262a9d66a6",
+      "ID": "14c088cc80478b56",
       "Request": {
         "Method": "GET",
-        "URL": "https://go-cloud-testing.s3.us-west-1.amazonaws.com/blob-for-reading",
+        "URL": "https://go-cloud-testing-2.s3.us-west-1.amazonaws.com/blob-for-reading?x-id=GetObject",
         "Header": {
           "Accept-Encoding": [
-            "gzip"
+            "identity"
+          ],
+          "Amz-Sdk-Invocation-Id": [
+            "CLEARED"
+          ],
+          "Amz-Sdk-Request": [
+            "attempt=1; max=1"
           ],
           "User-Agent": [
             "CLEARED"
+          ],
+          "X-Amz-Checksum-Mode": [
+            "ENABLED"
           ],
           "X-Amz-Content-Sha256": [
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -61,7 +73,7 @@
         },
         "MediaType": "",
         "BodyParts": [
-          ""
+          null
         ]
       },
       "Response": {
@@ -74,19 +86,19 @@
             "application/xml"
           ],
           "Date": [
-            "Thu, 03 Dec 2020 23:08:31 GMT"
+            "Tue, 02 Jun 2026 18:31:05 GMT"
           ],
           "Server": [
             "AmazonS3"
           ],
           "X-Amz-Id-2": [
-            "VeG4E9E0sz475YGStSRcU+pH6IQj4fNhBc1qFa4ra90FWTVksHofH7S8uCia+i+cLzf2LzyPcDw="
+            "mgQX2lvnjT+A86Yeh2W9CZQhN9R11XmzsrlJZ998bMcASnkyXQ2MdnTIZPKykVAQJC9LtpEbjQTK0Y5KXSK2iJnj+SRVueAk"
           ],
           "X-Amz-Request-Id": [
-            "2BA7D9F0A1E4E14F"
+            "FKSMZD8R1D7WPG61"
           ]
         },
-        "Body": "PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4KPEVycm9yPjxDb2RlPk5vU3VjaEtleTwvQ29kZT48TWVzc2FnZT5UaGUgc3BlY2lmaWVkIGtleSBkb2VzIG5vdCBleGlzdC48L01lc3NhZ2U+PEtleT5ibG9iLWZvci1yZWFkaW5nPC9LZXk+PFJlcXVlc3RJZD4yQkE3RDlGMEExRTRFMTRGPC9SZXF1ZXN0SWQ+PEhvc3RJZD5WZUc0RTlFMHN6NDc1WUdTdFNSY1UrcEg2SVFqNGZOaEJjMXFGYTRyYTkwRldUVmtzSG9mSDdTOHVDaWEraStjTHpmMkx6eVBjRHc9PC9Ib3N0SWQ+PC9FcnJvcj4="
+        "Body": "PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4KPEVycm9yPjxDb2RlPk5vU3VjaEtleTwvQ29kZT48TWVzc2FnZT5UaGUgc3BlY2lmaWVkIGtleSBkb2VzIG5vdCBleGlzdC48L01lc3NhZ2U+PEtleT5ibG9iLWZvci1yZWFkaW5nPC9LZXk+PFJlcXVlc3RJZD5GS1NNWkQ4UjFEN1dQRzYxPC9SZXF1ZXN0SWQ+PEhvc3RJZD5tZ1FYMmx2bmpUK0E4NlllaDJXOUNaUWhOOVIxMVhtenNybEpaOTk4Yk1jQVNua3lYUTJNZG5USVpQS3lrVkFRSkM5THRwRWJqUVRLMFk1S1hTSzJpSm5qK1NSVnVlQWs8L0hvc3RJZD48L0Vycm9yPg=="
       }
     }
   ]

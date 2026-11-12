@@ -86,6 +86,24 @@ URL:
 
 {{< goexample "gocloud.dev/blob.Example_openFromURLWithPrefix" >}}
 
+### Single Key Buckets {#singlekey}
+
+You can wrap a `*blob.Bucket` to always operate on a single key
+using `blob.SingleKeyBucket`:
+
+{{< goexample "gocloud.dev/blob.ExampleSingleKeyBucket" >}}
+
+Alternatively, you can configure the single key directly in the `blob.OpenBucket`
+URL:
+
+{{< goexample "gocloud.dev/blob.Example_openFromURLWithSingleKey" >}}
+
+The resulting bucket will ignore the `key` parameter to its functions,
+and always refer to the single key. This can be useful to allow configuration
+of a specific "file" via a single URL.
+
+`List` functions will not work on single key buckets.
+
 ## Using a Bucket {#using}
 
 Once you have opened a bucket for the storage provider you want, you can
@@ -122,7 +140,7 @@ ignore the error because the write's failure is expected.
 
 Once you have written data to a bucket, you can read it back by creating a
 reader. The reader implements [`io.Reader`][], so you can use any functions
-that take an `io.Reader` like `io.Copy` or `io/ioutil.ReadAll`. You must
+that take an `io.Reader` like `io.Copy` or `io/io.ReadAll`. You must
 always close a reader after using it to avoid leaking resources.
 
 {{< goexample src="gocloud.dev/blob.ExampleBucket_NewReader" imports="0" >}}
@@ -132,7 +150,16 @@ start reading from an arbitrary offset in the blob, use `NewRangeReader`.
 
 {{< goexample src="gocloud.dev/blob.ExampleBucket_NewRangeReader" imports="0" >}}
 
+To read a whole blob into a destination, use `Download`. When the destination
+implements [`io.WriterAt`][] (for example an [`*os.File`][]), some drivers
+download the blob in parallel, which can be significantly faster for large
+blobs; other drivers fall back to a single sequential stream.
+
+{{< goexample src="gocloud.dev/blob.ExampleBucket_Download" imports="0" >}}
+
 [`io.Reader`]: https://golang.org/pkg/io/#Reader
+[`io.WriterAt`]: https://golang.org/pkg/io/#WriterAt
+[`*os.File`]: https://golang.org/pkg/os/#File
 
 ### Deleting a Bucket {#deleting}
 
@@ -191,30 +218,25 @@ S3 URLs in the Go CDK closely resemble the URLs you would see in the [AWS CLI][]
 You should specify the `region` query parameter to ensure your application
 connects to the correct region.
 
-`blob.OpenBucket` will create a default AWS Session with the
-`SharedConfigEnable` option enabled; if you have authenticated with the AWS CLI,
-it will use those credentials. See [AWS Session][] to learn about authentication
-alternatives, including using environment variables.
-
-[AWS CLI]: https://aws.amazon.com/cli/
-[AWS Session]: https://docs.aws.amazon.com/sdk-for-go/api/aws/session/
-
-{{< goexample "gocloud.dev/blob/s3blob.Example_openBucketFromURL" >}}
+It will create an AWS Config based on the AWS SDK V2; see [AWS V2 Config][] to learn more.
 
 Full details about acceptable URLs can be found under the API reference for
 [`s3blob.URLOpener`][].
 
+{{< goexample "gocloud.dev/blob/s3blob.Example_openBucketFromURL" >}}
+
+[AWS CLI]: https://aws.amazon.com/cli/
+[AWS V2 Config]: https://aws.github.io/aws-sdk-go-v2/docs/configuring-sdk/
 [`s3blob.URLOpener`]: https://godoc.org/gocloud.dev/blob/s3blob#URLOpener
 
 #### S3 Constructor {#s3-ctor}
 
 The [`s3blob.OpenBucket`][] constructor opens an [S3][] bucket. You must first
-create an [AWS session][] with the same region as your bucket:
+create an AWS Config with the same region as your bucket:
 
 {{< goexample "gocloud.dev/blob/s3blob.ExampleOpenBucket" >}}
 
 [`s3blob.OpenBucket`]: https://godoc.org/gocloud.dev/blob/s3blob#OpenBucket
-[AWS session]: https://docs.aws.amazon.com/sdk-for-go/api/aws/session/
 [S3]: https://aws.amazon.com/s3/
 
 #### S3-Compatible Servers {#s3-compatible}
@@ -229,13 +251,13 @@ parameters like so:
 ```go
 bucket, err := blob.OpenBucket("s3://mybucket?" +
     "endpoint=my.minio.local:8080&" +
-    "disableSSL=true&" +
+    "disable_https=true&" +
     "s3ForcePathStyle=true")
 ```
 
-See [`aws.ConfigFromURLParams`][] for more details on supported URL options for S3.
+See [`aws.V2ConfigFromURLParams`][] for more details on supported URL options for S3.
 
-[`aws.ConfigFromURLParams`]: https://godoc.org/gocloud.dev/aws#ConfigFromURLParams
+[`aws.V2ConfigFromURLParams`]: https://godoc.org/gocloud.dev/aws#V2ConfigFromURLParams
 [`Endpoint` field]: https://godoc.org/github.com/aws/aws-sdk-go/aws#Config.Endpoint
 [Ceph]: https://ceph.com/
 [Minio]: https://www.minio.io/
@@ -247,8 +269,7 @@ See [`aws.ConfigFromURLParams`][] for more details on supported URL options for 
 Azure Blob Storage URLs in the Go CDK allow you to identify [Azure Blob Storage][] containers
 when opening a bucket with `blob.OpenBucket`. Go CDK uses the environment
 variables `AZURE_STORAGE_ACCOUNT`, `AZURE_STORAGE_KEY`, and
-`AZURE_STORAGE_SAS_TOKEN` to configure the credentials. `AZURE_STORAGE_ACCOUNT`
-is required, along with one of the other two.
+`AZURE_STORAGE_SAS_TOKEN`, among others, to configure the credentials.
 
 {{< goexample "gocloud.dev/blob/azureblob.Example_openBucketFromURL" >}}
 
@@ -262,8 +283,7 @@ Full details about acceptable URLs can be found under the API reference for
 
 The [`azureblob.OpenBucket`][] constructor opens an Azure Blob Storage container.
 `azureblob` operates on [Azure Storage Block Blobs][]. You must first create
-Azure Storage credentials and then create an Azure Storage pipeline before
-you can open a container.
+an Azure Service Client before you can open a container.
 
 {{< goexample "gocloud.dev/blob/azureblob.ExampleOpenBucket" >}}
 

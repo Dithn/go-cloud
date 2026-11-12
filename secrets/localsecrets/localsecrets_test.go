@@ -43,6 +43,8 @@ func (h *harness) MakeDriver(ctx context.Context) (driver.Keeper, driver.Keeper,
 func (h *harness) Close() {}
 
 func newHarness(ctx context.Context, t *testing.T) (drivertest.Harness, error) {
+	t.Helper()
+
 	return &harness{}, nil
 }
 
@@ -70,7 +72,11 @@ func TestSmallData(t *testing.T) {
 		t.Fatal(err)
 	}
 	keeper := NewKeeper(key)
-	defer keeper.Close()
+	defer func() {
+		if err := keeper.Close(); err != nil {
+			t.Errorf("failed to close: %v", err)
+		}
+	}()
 
 	ctx := context.Background()
 	const plaintext = "hello world"

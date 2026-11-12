@@ -17,7 +17,6 @@ package filevar
 import (
 	"context"
 	"errors"
-	"io/ioutil"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -39,10 +38,10 @@ type harness struct {
 }
 
 func newHarness(t *testing.T) (drivertest.Harness, error) {
-	dir, err := ioutil.TempDir("", "filevar_test-")
-	if err != nil {
-		return nil, err
-	}
+	t.Helper()
+
+	dir := t.TempDir()
+
 	return &harness{
 		dir:    dir,
 		closer: func() { _ = os.RemoveAll(dir) },
@@ -58,15 +57,17 @@ func (h *harness) MakeWatcher(ctx context.Context, name string, decoder *runtime
 func (h *harness) CreateVariable(ctx context.Context, name string, val []byte) error {
 	// Write to a temporary file and rename; otherwise,
 	// Watch can read an empty file during the write.
-	tmp, err := ioutil.TempFile(h.dir, "tmp")
+	tmp, err := os.CreateTemp(h.dir, "tmp")
 	if err != nil {
 		return err
 	}
 	if _, err := tmp.Write(val); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
-	tmp.Close()
+	if err := tmp.Close(); err != nil {
+		return err
+	}
 	return os.Rename(tmp.Name(), filepath.Join(h.dir, name))
 }
 
@@ -114,10 +115,7 @@ func (verifyAs) ErrorCheck(v *runtimevar.Variable, err error) error {
 // Filevar-specific tests.
 
 func TestOpenVariable(t *testing.T) {
-	dir, err := ioutil.TempDir("", "filevar_test-")
-	if err != nil {
-		t.Fatal(err)
-	}
+	dir := t.TempDir()
 
 	tests := []struct {
 		description string
@@ -161,7 +159,9 @@ func TestOpenVariable(t *testing.T) {
 				if drv.path != test.want {
 					t.Errorf("got %q want %q", drv.path, test.want)
 				}
-				drv.Close()
+				if err := drv.Close(); err != nil {
+					t.Errorf("failed to Close: %v", err)
+				}
 			}
 
 			// Create portable type.
@@ -170,35 +170,31 @@ func TestOpenVariable(t *testing.T) {
 				t.Errorf("got err %v want error %v", err, test.wantErr)
 			}
 			if w != nil {
-				w.Close()
+				if err := w.Close(); err != nil {
+					t.Errorf("failed to Close: %v", err)
+				}
 			}
 		})
 	}
 }
 
 func TestOpenVariableURL(t *testing.T) {
-	dir, err := ioutil.TempDir("", "gcdk-filevar-example")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
 	jsonPath := filepath.Join(dir, "myvar.json")
-	if err := ioutil.WriteFile(jsonPath, []byte(`{"Foo": "Bar"}`), 0666); err != nil {
+	if err := os.WriteFile(jsonPath, []byte(`{"Foo": "Bar"}`), 0o666); err != nil {
 		t.Fatal(err)
 	}
 	txtPath := filepath.Join(dir, "myvar.txt")
-	if err := ioutil.WriteFile(txtPath, []byte("hello world!"), 0666); err != nil {
+	if err := os.WriteFile(txtPath, []byte("hello world!"), 0o666); err != nil {
 		t.Fatal(err)
 	}
 	nonexistentPath := filepath.Join(dir, "filenotfound")
 	ctx := context.Background()
 	secretsPath := filepath.Join(dir, "mysecret.txt")
-	cleanup, err := setupTestSecrets(ctx, dir, secretsPath)
-	if err != nil {
+	if err := setupTestSecrets(ctx, t, dir, secretsPath); err != nil {
 		t.Fatal(err)
 	}
-	defer cleanup()
 
 	// Convert paths to a URL path, adding a leading "/" if needed on Windows
 	// (on Unix, dirpath already has a leading "/").
@@ -225,7 +221,7 @@ func TestOpenVariableURL(t *testing.T) {
 		URL          string
 		WantErr      bool
 		WantWatchErr bool
-		Want         interface{}
+		Want         any
 	}{
 		// Variable construction succeeds, but the file does not exist.
 		{"file://" + nonexistentPath, false, true, nil},
@@ -238,15 +234,21 @@ func TestOpenVariableURL(t *testing.T) {
 		// Working example with string decoder.
 		{"file://" + txtPath + "?decoder=string", false, false, "hello world!"},
 		// Working example with JSON decoder.
-		{"file://" + jsonPath + "?decoder=jsonmap", false, false, &map[string]interface{}{"Foo": "Bar"}},
+		{"file://" + jsonPath + "?decoder=jsonmap", false, false, &map[string]any{"Foo": "Bar"}},
 		// Working example with decrypt (default) decoder.
 		{"file://" + secretsPath + "?decoder=decrypt", false, false, []byte(`{"Foo":"Bar"}`)},
 		// Working example with decrypt+bytes decoder.
 		{"file://" + secretsPath + "?decoder=decrypt+bytes", false, false, []byte(`{"Foo":"Bar"}`)},
 		// Working example with decrypt+json decoder.
-		{"file://" + secretsPath + "?decoder=decrypt+jsonmap", false, false, &map[string]interface{}{"Foo": "Bar"}},
+		{"file://" + secretsPath + "?decoder=decrypt+jsonmap", false, false, &map[string]any{"Foo": "Bar"}},
 		// Working example with escaped decrypt+json decoder
-		{"file://" + secretsPath + "?decoder=" + url.QueryEscape("decrypt+jsonmap"), false, false, &map[string]interface{}{"Foo": "Bar"}},
+		{"file://" + secretsPath + "?decoder=" + url.QueryEscape("decrypt+jsonmap"), false, false, &map[string]any{"Foo": "Bar"}},
+		// Setting wait.
+		{"file://" + txtPath + "?decoder=string&wait=1m", false, false, "hello world!"},
+		// Invalid wait.
+		{"file://" + txtPath + "?decoder=string&wait=xx", true, false, nil},
+		// Relative path using host="."; bucket is created but error at read time.
+		{"file://./../.." + nonexistentPath, false, true, nil},
 	}
 
 	for _, test := range tests {
@@ -258,7 +260,11 @@ func TestOpenVariableURL(t *testing.T) {
 			if err != nil {
 				return
 			}
-			defer v.Close()
+			defer func() {
+				if err := v.Close(); err != nil {
+					t.Errorf("failed to Close: %v", err)
+				}
+			}()
 			snapshot, err := v.Watch(ctx)
 			if (err != nil) != test.WantWatchErr {
 				t.Errorf("%s: got Watch error %v, want error %v", test.URL, err, test.WantWatchErr)
@@ -273,23 +279,21 @@ func TestOpenVariableURL(t *testing.T) {
 	}
 }
 
-func setupTestSecrets(ctx context.Context, dir, secretsPath string) (func(), error) {
+func setupTestSecrets(ctx context.Context, t *testing.T, dir, secretsPath string) error {
 	const keeperEnv = "RUNTIMEVAR_KEEPER_URL"
 	const keeperURL = "base64key://smGbjm71Nxd1Ig5FS0wj9SlbzAIrnolCz9bQQ6uAhl4="
-	oldURL := os.Getenv(keeperEnv)
-	os.Setenv(keeperEnv, keeperURL)
-	cleanup := func() { os.Setenv(keeperEnv, oldURL) }
+	t.Setenv(keeperEnv, keeperURL)
 
 	k, err := secrets.OpenKeeper(ctx, keeperURL)
 	if err != nil {
-		return cleanup, err
+		return err
 	}
 	sc, err := k.Encrypt(ctx, []byte(`{"Foo":"Bar"}`))
 	if err != nil {
-		return cleanup, err
+		return err
 	}
-	if err := ioutil.WriteFile(secretsPath, sc, 0666); err != nil {
-		return cleanup, err
+	if err := os.WriteFile(secretsPath, sc, 0o666); err != nil {
+		return err
 	}
-	return cleanup, nil
+	return nil
 }

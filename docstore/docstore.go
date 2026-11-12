@@ -21,15 +21,17 @@ import (
 	"log"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"unicode/utf8"
 
+	"go.opentelemetry.io/otel/trace"
 	"gocloud.dev/docstore/driver"
 	"gocloud.dev/gcerrors"
 	"gocloud.dev/internal/gcerr"
-	"gocloud.dev/internal/oc"
+	gcdkotel "gocloud.dev/internal/otel"
 )
 
 // A Document is a set of field-value pairs. One or more fields, called the key
@@ -39,14 +41,14 @@ import (
 //
 // A Document can be represented as a map[string]int or a pointer to a struct. For
 // structs, the exported fields are the document fields.
-type Document = interface{}
+type Document = any
 
 // A Collection represents a set of documents. It provides an easy and portable
 // way to interact with document stores.
 // To create a Collection, use constructors found in driver subpackages.
 type Collection struct {
 	driver driver.Collection
-	tracer *oc.Tracer
+	tracer *gcdkotel.Tracer
 	mu     sync.Mutex
 	closed bool
 }
@@ -54,12 +56,11 @@ type Collection struct {
 const pkgName = "gocloud.dev/docstore"
 
 var (
-	latencyMeasure = oc.LatencyMeasure(pkgName)
 
-	// OpenCensusViews are predefined views for OpenCensus metrics.
+	// OpenTelemetryViews are predefined views for OpenTelemetry metrics.
 	// The views include counts and latency distributions for API method calls.
-	// See the example at https://godoc.org/go.opencensus.io/stats/view for usage.
-	OpenCensusViews = oc.Views(pkgName, latencyMeasure)
+	// See the explanations at https://opentelemetry.io/docs/specs/otel/metrics/data-model/ for usage.
+	OpenTelemetryViews = gcdkotel.Views(pkgName)
 )
 
 // NewCollection is intended for use by drivers only. Do not use in application code.
@@ -67,13 +68,10 @@ var NewCollection = newCollection
 
 // newCollection makes a Collection.
 func newCollection(d driver.Collection) *Collection {
+	providerName := gcdkotel.ProviderName(d)
 	c := &Collection{
 		driver: d,
-		tracer: &oc.Tracer{
-			Package:        pkgName,
-			Provider:       oc.ProviderName(d),
-			LatencyMeasure: latencyMeasure,
-		},
+		tracer: gcdkotel.NewTracer(pkgName, providerName),
 	}
 	_, file, lineno, ok := runtime.Caller(1)
 	runtime.SetFinalizer(c, func(c *Collection) {
@@ -104,9 +102,10 @@ func (c *Collection) revisionField() string {
 }
 
 // A FieldPath is a dot-separated sequence of UTF-8 field names. Examples:
-//   room
-//   room.size
-//   room.size.width
+//
+//	room
+//	room.size
+//	room.size.width
 //
 // A FieldPath can be used select top-level fields or elements of sub-documents.
 // There is no way to select a single list element.
@@ -134,18 +133,20 @@ func (c *Collection) Actions() *ActionList {
 // document; a Get after the write will see the new value if the service is strongly
 // consistent, but may see the old value if the service is eventually consistent.
 type ActionList struct {
-	coll     *Collection
-	actions  []*Action
-	beforeDo func(asFunc func(interface{}) bool) error
+	coll               *Collection
+	actions            []*Action
+	enableAtomicWrites bool
+	beforeDo           func(asFunc func(any) bool) error
 }
 
 // An Action is a read or write on a single document.
 // Use the methods of ActionList to create and execute Actions.
 type Action struct {
-	kind       driver.ActionKind
-	doc        Document
-	fieldpaths []FieldPath // paths to retrieve, for Get
-	mods       Mods        // modifications to make, for Update
+	kind          driver.ActionKind
+	doc           Document
+	fieldpaths    []FieldPath // paths to retrieve, for Get
+	mods          Mods        // modifications to make, for Update
+	inAtomicWrite bool        // if this action is a part of atomic writes
 }
 
 func (l *ActionList) add(a *Action) *ActionList {
@@ -169,7 +170,7 @@ func (l *ActionList) add(a *Action) *ActionList {
 // Except for setting the revision field and possibly setting the key fields, the doc
 // argument is not modified.
 func (l *ActionList) Create(doc Document) *ActionList {
-	return l.add(&Action{kind: driver.Create, doc: doc})
+	return l.add(&Action{kind: driver.Create, doc: doc, inAtomicWrite: l.enableAtomicWrites})
 }
 
 // Replace adds an action that replaces a document to the given ActionList, and
@@ -181,7 +182,7 @@ func (l *ActionList) Create(doc Document) *ActionList {
 // See the Revisions section of the package documentation for how revisions are
 // handled.
 func (l *ActionList) Replace(doc Document) *ActionList {
-	return l.add(&Action{kind: driver.Replace, doc: doc})
+	return l.add(&Action{kind: driver.Replace, doc: doc, inAtomicWrite: l.enableAtomicWrites})
 }
 
 // Put adds an action that adds or replaces a document to the given ActionList, and returns the ActionList.
@@ -194,7 +195,7 @@ func (l *ActionList) Replace(doc Document) *ActionList {
 // See the Revisions section of the package documentation for how revisions are
 // handled.
 func (l *ActionList) Put(doc Document) *ActionList {
-	return l.add(&Action{kind: driver.Put, doc: doc})
+	return l.add(&Action{kind: driver.Put, doc: doc, inAtomicWrite: l.enableAtomicWrites})
 }
 
 // Delete adds an action that deletes a document to the given ActionList, and returns
@@ -209,7 +210,7 @@ func (l *ActionList) Delete(doc Document) *ActionList {
 	// semantics of an action list are to stop at first error, then we might abort a
 	// list of Deletes just because one of the docs was not present, and that seems
 	// wrong, or at least something you'd want to turn off.
-	return l.add(&Action{kind: driver.Delete, doc: doc})
+	return l.add(&Action{kind: driver.Delete, doc: doc, inAtomicWrite: l.enableAtomicWrites})
 }
 
 // Get adds an action that retrieves a document to the given ActionList, and
@@ -251,28 +252,30 @@ func (l *ActionList) Get(doc Document, fps ...FieldPath) *ActionList {
 // the updated document, call Get after calling Update.
 func (l *ActionList) Update(doc Document, mods Mods) *ActionList {
 	return l.add(&Action{
-		kind: driver.Update,
-		doc:  doc,
-		mods: mods,
+		kind:          driver.Update,
+		doc:           doc,
+		mods:          mods,
+		inAtomicWrite: l.enableAtomicWrites,
 	})
 }
 
 // Mods is a map from field paths to modifications.
 // At present, a modification is one of:
-//  - nil, to delete the field
-//  - an Increment value, to add a number to the field
-//  - any other value, to set the field to that value
+//   - nil, to delete the field
+//   - an Increment value, to add a number to the field
+//   - any other value, to set the field to that value
+//
 // See ActionList.Update.
-type Mods map[FieldPath]interface{}
+type Mods map[FieldPath]any
 
 // Increment returns a modification that results in a field being incremented. It
 // should only be used as a value in a Mods map, like so:
 //
-//    docstore.Mods{"count": docstore.Increment(1)}
+//	docstore.Mods{"count": docstore.Increment(1)}
 //
 // The amount must be an integer or floating-point value.
-func Increment(amount interface{}) interface{} {
-	return driver.IncOp{amount}
+func Increment(amount any) any {
+	return driver.IncOp{Amount: amount}
 }
 
 // An ActionListError is returned by ActionList.Do. It contains all the errors
@@ -293,16 +296,13 @@ func (e ActionListError) Error() string {
 	return strings.Join(s, "; ")
 }
 
-// Unwrap returns the error in e, if there is exactly one. If there is more than one
-// error, Unwrap returns nil, since there is no way to determine which should be
-// returned.
-func (e ActionListError) Unwrap() error {
-	if len(e) == 1 {
-		return e[0].Err
+// Unwrap returns all underlying errors from e.
+func (e ActionListError) Unwrap() []error {
+	errs := []error{}
+	for _, err := range e {
+		errs = append(errs, err.Err)
 	}
-	// Return nil when e is nil, or has more than one error.
-	// When there are multiple errors, it doesn't make sense to return any of them.
-	return nil
+	return errs
 }
 
 // BeforeDo takes a callback function that will be called before the ActionList is
@@ -314,7 +314,7 @@ func (e ActionListError) Unwrap() error {
 // The callback takes a parameter, asFunc, that converts its argument to
 // driver-specific types. See https://gocloud.dev/concepts/as for background
 // information.
-func (l *ActionList) BeforeDo(f func(asFunc func(interface{}) bool) error) *ActionList {
+func (l *ActionList) BeforeDo(f func(asFunc func(any) bool) error) *ActionList {
 	l.beforeDo = f
 	return l
 }
@@ -333,15 +333,16 @@ func (l *ActionList) Do(ctx context.Context) error {
 	return l.do(ctx, true)
 }
 
-// do implements Do with optional OpenCensus tracing, so it can be used internally.
-func (l *ActionList) do(ctx context.Context, oc bool) (err error) {
+// do implements Do with optional OpenTelemetry tracing, so it can be used internally.
+func (l *ActionList) do(ctx context.Context, withTracing bool) (err error) {
 	if err := l.coll.checkClosed(); err != nil {
 		return ActionListError{{-1, errClosed}}
 	}
 
-	if oc {
-		ctx = l.coll.tracer.Start(ctx, "ActionList.Do")
-		defer func() { l.coll.tracer.End(ctx, err) }()
+	if withTracing {
+		var span trace.Span
+		ctx, span = l.coll.tracer.Start(ctx, "ActionList.Do")
+		defer func() { l.coll.tracer.End(ctx, span, err) }()
 	}
 
 	das, err := l.toDriverActions()
@@ -365,7 +366,7 @@ func (l *ActionList) toDriverActions() ([]*driver.Action, error) {
 	// Create a set of (document key, is Get action) pairs for detecting duplicates:
 	// an action list can have at most one get and at most one write for each key.
 	type keyAndKind struct {
-		key   interface{}
+		key   any
 		isGet bool
 	}
 	seen := map[keyAndKind]bool{}
@@ -416,7 +417,7 @@ func (c *Collection) toDriverAction(a *Action) (*driver.Action, error) {
 		// empty.
 		key = nil
 	}
-	if reflect.ValueOf(key).Kind() == reflect.Ptr {
+	if reflect.ValueOf(key).Kind() == reflect.Pointer {
 		return nil, gcerr.Newf(gcerr.InvalidArgument, nil, "keys cannot be pointers")
 	}
 	rev, _ := ddoc.GetField(c.revisionField())
@@ -428,7 +429,7 @@ func (c *Collection) toDriverAction(a *Action) (*driver.Action, error) {
 		// A Put with a revision field is equivalent to a Replace.
 		kind = driver.Replace
 	}
-	d := &driver.Action{Kind: kind, Doc: ddoc, Key: key}
+	d := &driver.Action{Kind: kind, Doc: ddoc, Key: key, InAtomicWrite: a.inAtomicWrite}
 	if a.fieldpaths != nil {
 		d.FieldPaths, err = parseFieldPaths(a.fieldpaths)
 		if err != nil {
@@ -511,7 +512,7 @@ func fpHasPrefix(fp, prefix []string) bool {
 	return true
 }
 
-func isIncNumber(x interface{}) bool {
+func isIncNumber(x any) bool {
 	switch reflect.TypeOf(x).Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		return true
@@ -532,6 +533,12 @@ func (l *ActionList) String() string {
 	return "[" + strings.Join(as, ", ") + "]"
 }
 
+// AtomicWrites causes all following writes in the list to execute as a single atomic operation.
+func (l *ActionList) AtomicWrites() *ActionList {
+	l.enableAtomicWrites = true
+	return l
+}
+
 func (a *Action) String() string {
 	buf := &strings.Builder{}
 	fmt.Fprintf(buf, "%s(%v", a.kind, a.doc)
@@ -548,55 +555,37 @@ func (a *Action) String() string {
 // Create is a convenience for building and running a single-element action list.
 // See ActionList.Create.
 func (c *Collection) Create(ctx context.Context, doc Document) error {
-	if err := c.Actions().Create(doc).Do(ctx); err != nil {
-		return err.(ActionListError).Unwrap()
-	}
-	return nil
+	return c.Actions().Create(doc).Do(ctx)
 }
 
 // Replace is a convenience for building and running a single-element action list.
 // See ActionList.Replace.
 func (c *Collection) Replace(ctx context.Context, doc Document) error {
-	if err := c.Actions().Replace(doc).Do(ctx); err != nil {
-		return err.(ActionListError).Unwrap()
-	}
-	return nil
+	return c.Actions().Replace(doc).Do(ctx)
 }
 
 // Put is a convenience for building and running a single-element action list.
 // See ActionList.Put.
 func (c *Collection) Put(ctx context.Context, doc Document) error {
-	if err := c.Actions().Put(doc).Do(ctx); err != nil {
-		return err.(ActionListError).Unwrap()
-	}
-	return nil
+	return c.Actions().Put(doc).Do(ctx)
 }
 
 // Delete is a convenience for building and running a single-element action list.
 // See ActionList.Delete.
 func (c *Collection) Delete(ctx context.Context, doc Document) error {
-	if err := c.Actions().Delete(doc).Do(ctx); err != nil {
-		return err.(ActionListError).Unwrap()
-	}
-	return nil
+	return c.Actions().Delete(doc).Do(ctx)
 }
 
 // Get is a convenience for building and running a single-element action list.
 // See ActionList.Get.
 func (c *Collection) Get(ctx context.Context, doc Document, fps ...FieldPath) error {
-	if err := c.Actions().Get(doc, fps...).Do(ctx); err != nil {
-		return err.(ActionListError).Unwrap()
-	}
-	return nil
+	return c.Actions().Get(doc, fps...).Do(ctx)
 }
 
 // Update is a convenience for building and running a single-element action list.
 // See ActionList.Update.
 func (c *Collection) Update(ctx context.Context, doc Document, mods Mods) error {
-	if err := c.Actions().Update(doc, mods).Do(ctx); err != nil {
-		return err.(ActionListError).Unwrap()
-	}
-	return nil
+	return c.Actions().Update(doc, mods).Do(ctx)
 }
 
 func parseFieldPath(fp FieldPath) ([]string, error) {
@@ -607,10 +596,8 @@ func parseFieldPath(fp FieldPath) ([]string, error) {
 		return nil, gcerr.Newf(gcerr.InvalidArgument, nil, "invalid UTF-8 field path %q", fp)
 	}
 	parts := strings.Split(string(fp), ".")
-	for _, p := range parts {
-		if p == "" {
-			return nil, gcerr.Newf(gcerr.InvalidArgument, nil, "empty component in field path %q", fp)
-		}
+	if slices.Contains(parts, "") {
+		return nil, gcerr.Newf(gcerr.InvalidArgument, nil, "empty component in field path %q", fp)
 	}
 	return parts, nil
 }
@@ -620,7 +607,7 @@ func parseFieldPath(fp FieldPath) ([]string, error) {
 // form that can be passed around (e.g., as a hidden field on a web form)
 // and then turned back into a revision using StringToRevision. The string is safe
 // for use in URLs and HTTP forms.
-func (c *Collection) RevisionToString(rev interface{}) (string, error) {
+func (c *Collection) RevisionToString(rev any) (string, error) {
 	if rev == nil {
 		return "", gcerr.Newf(gcerr.InvalidArgument, nil, "RevisionToString: nil revision")
 	}
@@ -633,7 +620,7 @@ func (c *Collection) RevisionToString(rev interface{}) (string, error) {
 
 // StringToRevision converts a string obtained with RevisionToString
 // to a revision.
-func (c *Collection) StringToRevision(s string) (interface{}, error) {
+func (c *Collection) StringToRevision(s string) (any, error) {
 	if s == "" {
 		return "", gcerr.Newf(gcerr.InvalidArgument, nil, "StringToRevision: empty string")
 	}
@@ -652,7 +639,7 @@ func (c *Collection) StringToRevision(s string) (interface{}, error) {
 // See https://gocloud.dev/concepts/as/ for background information, the "As"
 // examples in this package for examples, and the driver package
 // documentation for the specific types supported for that driver.
-func (c *Collection) As(i interface{}) bool {
+func (c *Collection) As(i any) bool {
 	if i == nil {
 		return false
 	}
@@ -705,6 +692,6 @@ func wrapError(c driver.Collection, err error) error {
 //
 // ErrorAs panics if i is nil or not a pointer.
 // ErrorAs returns false if err == nil.
-func (c *Collection) ErrorAs(err error, i interface{}) bool {
+func (c *Collection) ErrorAs(err error, i any) bool {
 	return gcerr.ErrorAs(err, i, c.driver.ErrorAs)
 }

@@ -19,7 +19,7 @@ import (
 	"log"
 	"os"
 
-	servicebus "github.com/Azure/azure-service-bus-go"
+	servicebus "github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
 	"gocloud.dev/pubsub"
 	"gocloud.dev/pubsub/azuresb"
 )
@@ -38,22 +38,22 @@ func ExampleOpenTopic() {
 	}
 
 	// Connect to Azure Service Bus for the given topic.
-	busNamespace, err := azuresb.NewNamespaceFromConnectionString(connString)
+	sbClient, err := azuresb.NewClientFromConnectionString(connString, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
-	busTopic, err := azuresb.NewTopic(busNamespace, topicName, nil)
+	sbSender, err := azuresb.NewSender(sbClient, topicName, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer busTopic.Close(ctx)
+	defer func() { _ = sbSender.Close(ctx) }()
 
 	// Construct a *pubsub.Topic.
-	topic, err := azuresb.OpenTopic(ctx, busTopic, nil)
+	topic, err := azuresb.OpenTopic(ctx, sbSender, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer topic.Shutdown(ctx)
+	defer func() { _ = topic.Shutdown(ctx) }()
 }
 
 func Example_openTopicFromURL() {
@@ -69,7 +69,7 @@ func Example_openTopicFromURL() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer topic.Shutdown(ctx)
+	defer func() { _ = topic.Shutdown(ctx) }()
 }
 
 func ExampleOpenSubscription() {
@@ -83,28 +83,22 @@ func ExampleOpenSubscription() {
 	const subscriptionName = "test-subscription"
 
 	// Connect to Azure Service Bus for the given subscription.
-	busNamespace, err := azuresb.NewNamespaceFromConnectionString(serviceBusConnString)
+	sbClient, err := azuresb.NewClientFromConnectionString(serviceBusConnString, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
-	busTopic, err := azuresb.NewTopic(busNamespace, topicName, nil)
+	sbReceiver, err := azuresb.NewReceiver(sbClient, topicName, subscriptionName, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer busTopic.Close(ctx)
-	busSub, err := azuresb.NewSubscription(busTopic, subscriptionName, nil)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer busSub.Close(ctx)
+	defer func() { _ = sbReceiver.Close(ctx) }()
 
 	// Construct a *pubsub.Subscription.
-	subscription, err := azuresb.OpenSubscription(ctx,
-		busNamespace, busTopic, busSub, nil)
+	subscription, err := azuresb.OpenSubscription(ctx, sbClient, sbReceiver, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer subscription.Shutdown(ctx)
+	defer func() { _ = subscription.Shutdown(ctx) }()
 }
 
 func Example_openSubscriptionFromURL() {
@@ -122,11 +116,10 @@ func Example_openSubscriptionFromURL() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer subscription.Shutdown(ctx)
+	defer func() { _ = subscription.Shutdown(ctx) }()
 }
 
-func Example_OpenSubscription_inReceiveAndDeleteMode() {
-
+func ExampleOpenSubscription_inReceiveAndDeleteMode() {
 	ctx := context.Background()
 
 	// Change these as needed for your application.
@@ -135,33 +128,29 @@ func Example_OpenSubscription_inReceiveAndDeleteMode() {
 	const subscriptionName = "test-subscription"
 
 	// Connect to Azure Service Bus for the given subscription.
-	busNamespace, err := azuresb.NewNamespaceFromConnectionString(serviceBusConnString)
+	sbClient, err := azuresb.NewClientFromConnectionString(serviceBusConnString, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
-	busTopic, err := azuresb.NewTopic(busNamespace, topicName, nil)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer busTopic.Close(ctx)
 	// Create the azuresb.Subscription, configuring it with the
 	// ReceiveAndDelete option.
-	// See https://godoc.org/github.com/Azure/azure-service-bus-go#SubscriptionWithReceiveAndDelete.
-	var opts []servicebus.SubscriptionOption
-	opts = append(opts, servicebus.SubscriptionWithReceiveAndDelete())
-	busSub, err := azuresb.NewSubscription(busTopic, subscriptionName, opts)
+	// See https://godoc.org/github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus#SubscriptionWithReceiveAndDelete.
+	sbReceiverOptions := &servicebus.ReceiverOptions{
+		ReceiveMode: servicebus.ReceiveModeReceiveAndDelete,
+	}
+	sbReceiver, err := azuresb.NewReceiver(sbClient, topicName, subscriptionName, sbReceiverOptions)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer busSub.Close(ctx)
+	defer func() { _ = sbReceiver.Close(ctx) }()
 
 	// Construct a *pubsub.Subscription. Since we configured
 	// the azuresb.Subscription with ReceiveAndDelete mode, we need
 	// to set SubscriptionOptions.ReceiveAndDelete = true.
 	subscription, err := azuresb.OpenSubscription(ctx,
-		busNamespace, busTopic, busSub, &azuresb.SubscriptionOptions{ReceiveAndDelete: true})
+		sbClient, sbReceiver, &azuresb.SubscriptionOptions{ReceiveAndDelete: true})
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer subscription.Shutdown(ctx)
+	defer func() { _ = subscription.Shutdown(ctx) }()
 }

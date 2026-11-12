@@ -26,10 +26,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/golang/protobuf/ptypes/wrappers"
+	pb "cloud.google.com/go/firestore/apiv1/firestorepb"
 	"gocloud.dev/docstore/driver"
 	"gocloud.dev/internal/gcerr"
-	pb "google.golang.org/genproto/googleapis/firestore/v1"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 func (c *collection) RunGetQuery(ctx context.Context, q *driver.Query) (driver.DocumentIterator, error) {
@@ -43,7 +43,7 @@ func (c *collection) newDocIterator(ctx context.Context, q *driver.Query) (*docI
 	}
 	req := &pb.RunQueryRequest{
 		Parent:    path.Dir(c.collPath),
-		QueryType: &pb.RunQueryRequest_StructuredQuery{sq},
+		QueryType: &pb.RunQueryRequest_StructuredQuery{StructuredQuery: sq},
 	}
 	if q.BeforeQuery != nil {
 		if err := q.BeforeQuery(driver.AsFunc(req)); err != nil {
@@ -51,7 +51,7 @@ func (c *collection) newDocIterator(ctx context.Context, q *driver.Query) (*docI
 		}
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	sc, err := c.client.RunQuery(ctx, req)
+	sc, err := c.client.RunQuery(withResourceHeader(ctx, c.dbPath), req)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -65,7 +65,7 @@ func (c *collection) newDocIterator(ctx context.Context, q *driver.Query) (*docI
 	}, nil
 }
 
-////////////////////////////////////////////////////////////////
+// //////////////////////////////////////////////////////////////
 // The code below is adapted from cloud.google.com/go/firestore.
 
 type docIterator struct {
@@ -112,7 +112,7 @@ func (it *docIterator) evaluateLocalFilters(pdoc *pb.Document) (bool, error) {
 		return true, nil
 	}
 	// TODO(jba): optimization: evaluate the filter directly on the proto document, without decoding.
-	m := map[string]interface{}{}
+	m := map[string]any{}
 	doc, err := driver.NewDocument(m)
 	if err != nil {
 		return false, err
@@ -138,9 +138,8 @@ func evaluateFilter(f driver.Filter, doc driver.Document) bool {
 	if t1, ok := val.(time.Time); ok {
 		if t2, ok := f.Value.(time.Time); ok {
 			return applyComparison(f.Op, driver.CompareTimes(t1, t2))
-		} else {
-			return false
 		}
+		return false
 	}
 	lhs := reflect.ValueOf(val)
 	rhs := reflect.ValueOf(f.Value)
@@ -149,6 +148,17 @@ func evaluateFilter(f driver.Filter, doc driver.Document) bool {
 			return false
 		}
 		return applyComparison(f.Op, strings.Compare(lhs.String(), rhs.String()))
+	}
+
+	if lhs.Kind() == reflect.Bool {
+		if rhs.Kind() != reflect.Bool {
+			return false
+		}
+		cmp := 0
+		if lhs.Bool() != rhs.Bool() {
+			cmp = -1
+		}
+		return applyComparison(f.Op, cmp)
 	}
 
 	cmp, err := driver.CompareNumbers(lhs, rhs)
@@ -179,7 +189,7 @@ func applyComparison(op string, c int) bool {
 
 func (it *docIterator) Stop() { it.cancel() }
 
-func (it *docIterator) As(i interface{}) bool {
+func (it *docIterator) As(i any) bool {
 	p, ok := i.(*pb.Firestore_RunQueryClient)
 	if !ok {
 		return false
@@ -202,8 +212,13 @@ func (c *collection) queryToProto(q *driver.Query) (*pb.StructuredQuery, []drive
 			p.Select.Fields = append(p.Select.Fields, fieldRef(fp))
 		}
 	}
+	// Apply offset.
+	if q.Offset > 0 {
+		p.Offset = int32(q.Offset)
+	}
+	// Apply limit.
 	if q.Limit > 0 {
-		p.Limit = &wrappers.Int32Value{Value: int32(q.Limit)}
+		p.Limit = &wrapperspb.Int32Value{Value: int32(q.Limit)}
 	}
 
 	// TODO(jba): make sure we retrieve the fields needed for local filters.
@@ -226,10 +241,11 @@ func (c *collection) queryToProto(q *driver.Query) (*pb.StructuredQuery, []drive
 		p.Where = pfs[0]
 	} else if len(pfs) > 1 {
 		p.Where = &pb.StructuredQuery_Filter{
-			FilterType: &pb.StructuredQuery_Filter_CompositeFilter{&pb.StructuredQuery_CompositeFilter{
-				Op:      pb.StructuredQuery_CompositeFilter_AND,
-				Filters: pfs,
-			}},
+			FilterType: &pb.StructuredQuery_Filter_CompositeFilter{
+				CompositeFilter: &pb.StructuredQuery_CompositeFilter{
+					Op:      pb.StructuredQuery_CompositeFilter_AND,
+					Filters: pfs,
+				}},
 		}
 	}
 
@@ -283,7 +299,7 @@ func (c *collection) filterToProto(f driver.Filter) (*pb.StructuredQuery_Filter,
 				"name field filter value %v of type %[1]T is not a string", f.Value)
 		}
 		return newFieldFilter([]string{"__name__"}, f.Op,
-			&pb.Value{ValueType: &pb.Value_ReferenceValue{c.collPath + "/" + v.String()}})
+			&pb.Value{ValueType: &pb.Value_ReferenceValue{ReferenceValue: c.collPath + "/" + v.String()}})
 	}
 	// "= nil" and "= NaN" are handled specially.
 	if uop, ok := unaryOpFor(f.Value); ok {
@@ -308,7 +324,7 @@ func (c *collection) filterToProto(f driver.Filter) (*pb.StructuredQuery_Filter,
 	return newFieldFilter(f.FieldPath, f.Op, pv)
 }
 
-func unaryOpFor(value interface{}) (pb.StructuredQuery_UnaryFilter_Operator, bool) {
+func unaryOpFor(value any) (pb.StructuredQuery_UnaryFilter_Operator, bool) {
 	switch {
 	case value == nil:
 		return pb.StructuredQuery_UnaryFilter_IS_NULL, true
@@ -319,7 +335,7 @@ func unaryOpFor(value interface{}) (pb.StructuredQuery_UnaryFilter_Operator, boo
 	}
 }
 
-func isNaN(x interface{}) bool {
+func isNaN(x any) bool {
 	switch x := x.(type) {
 	case float32:
 		return math.IsNaN(float64(x))
@@ -347,6 +363,10 @@ func newFieldFilter(fp []string, op string, val *pb.Value) (*pb.StructuredQuery_
 		fop = pb.StructuredQuery_FieldFilter_GREATER_THAN_OR_EQUAL
 	case driver.EqualOp:
 		fop = pb.StructuredQuery_FieldFilter_EQUAL
+	case "in":
+		fop = pb.StructuredQuery_FieldFilter_IN
+	case "not-in":
+		fop = pb.StructuredQuery_FieldFilter_NOT_IN
 	// TODO(jba): can we support array-contains portably?
 	// case "array-contains":
 	// 	fop = pb.StructuredQuery_FieldFilter_ARRAY_CONTAINS

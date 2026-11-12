@@ -20,6 +20,7 @@ import (
 	"reflect"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
 	"gocloud.dev/docstore/driver"
 	"gocloud.dev/internal/gcerr"
 )
@@ -37,9 +38,9 @@ func (c *Collection) Query() *Query {
 }
 
 // Where expresses a condition on the query.
-// Valid ops are: "=", ">", "<", ">=", "<=".
-// Valid values are strings, integers, floating-point numbers, and time.Time values.
-func (q *Query) Where(fp FieldPath, op string, value interface{}) *Query {
+// Valid ops are: "=", ">", "<", ">=", "<=, "in", "not-in".
+// Valid values are strings, integers, floating-point numbers, time.Time and boolean (only for "=", "in" and "not-in") values.
+func (q *Query) Where(fp FieldPath, op string, value any) *Query {
 	if q.err != nil {
 		return q
 	}
@@ -48,10 +49,11 @@ func (q *Query) Where(fp FieldPath, op string, value interface{}) *Query {
 		q.err = err
 		return q
 	}
-	if !validOp[op] {
-		return q.invalidf("invalid filter operator: %q. Use one of: =, >, <, >=, <=", op)
+	validator, ok := validOp[op]
+	if !ok {
+		return q.invalidf("invalid filter operator: %q. Use one of: =, >, <, >=, <=, in, not-in", op)
 	}
-	if !validFilterValue(value) {
+	if !validator(value) {
 		return q.invalidf("invalid filter value: %v", value)
 	}
 	q.dq.Filters = append(q.dq.Filters, driver.Filter{
@@ -62,15 +64,29 @@ func (q *Query) Where(fp FieldPath, op string, value interface{}) *Query {
 	return q
 }
 
-var validOp = map[string]bool{
-	"=":  true,
-	">":  true,
-	"<":  true,
-	">=": true,
-	"<=": true,
+type valueValidator func(any) bool
+
+var validOp = map[string]valueValidator{
+	"=":      validEqualValue,
+	">":      validFilterValue,
+	"<":      validFilterValue,
+	">=":     validFilterValue,
+	"<=":     validFilterValue,
+	"in":     validFilterSlice,
+	"not-in": validFilterSlice,
 }
 
-func validFilterValue(v interface{}) bool {
+func validEqualValue(v any) bool {
+	if v == nil {
+		return false
+	}
+	if reflect.TypeOf(v).Kind() == reflect.Bool {
+		return true
+	}
+	return validFilterValue(v)
+}
+
+func validFilterValue(v any) bool {
 	if v == nil {
 		return false
 	}
@@ -89,6 +105,38 @@ func validFilterValue(v interface{}) bool {
 	default:
 		return false
 	}
+}
+
+func validFilterSlice(v any) bool {
+	if v == nil || reflect.TypeOf(v).Kind() != reflect.Slice {
+		return false
+	}
+	vv := reflect.ValueOf(v)
+	for i := 0; i < vv.Len(); i++ {
+		if !validEqualValue(vv.Index(i).Interface()) {
+			return false
+		}
+	}
+	return true
+}
+
+// Offset (also commonly referred to as `Skip`) specifies the number of
+// documents to skip before returning results.
+// n must be non-negative.
+// It is an error to specify Offset more than once in a Get query, or
+// at all in a Delete or Update query.
+func (q *Query) Offset(n int) *Query {
+	if q.err != nil {
+		return q
+	}
+	if n < 0 {
+		return q.invalidf("offset value of %d must be non-negative", n)
+	}
+	if q.dq.Offset > 0 {
+		return q.invalidf("query can have at most one offset clause")
+	}
+	q.dq.Offset = n
+	return q
 }
 
 // Limit will limit the results to at most n documents.
@@ -144,7 +192,7 @@ func (q *Query) OrderBy(field, direction string) *Query {
 // executed to the underlying service's query functionality. The callback takes
 // a parameter, asFunc, that converts its argument to driver-specific types.
 // See https://gocloud.dev/concepts/as/ for background information.
-func (q *Query) BeforeQuery(f func(asFunc func(interface{}) bool) error) *Query {
+func (q *Query) BeforeQuery(f func(asFunc func(any) bool) error) *Query {
 	q.dq.BeforeQuery = f
 	return q
 }
@@ -157,17 +205,21 @@ func (q *Query) Get(ctx context.Context, fps ...FieldPath) *DocumentIterator {
 	return q.get(ctx, true, fps...)
 }
 
-// get implements Get, with optional OpenCensus tracing so it can be used internally.
-func (q *Query) get(ctx context.Context, oc bool, fps ...FieldPath) *DocumentIterator {
+// get implements Get, with optional OpenTelemetry tracing so it can be used internally.
+func (q *Query) get(ctx context.Context, withTracing bool, fps ...FieldPath) *DocumentIterator {
 	dcoll := q.coll.driver
 	if err := q.initGet(fps); err != nil {
 		return &DocumentIterator{err: wrapError(dcoll, err)}
 	}
 
 	var err error
-	if oc {
-		ctx = q.coll.tracer.Start(ctx, "Query.Get")
-		defer func() { q.coll.tracer.End(ctx, err) }()
+
+	if withTracing {
+		var span trace.Span
+		ctx, span = q.coll.tracer.Start(ctx, "Query.Get")
+		defer func() {
+			q.coll.tracer.End(ctx, span, err)
+		}()
 	}
 	it, err := dcoll.RunGetQuery(ctx, q.dq)
 	return &DocumentIterator{iter: it, coll: q.coll, err: wrapError(dcoll, err)}
@@ -201,7 +253,7 @@ func (q *Query) initGet(fps []FieldPath) error {
 	return nil
 }
 
-func (q *Query) invalidf(format string, args ...interface{}) *Query {
+func (q *Query) invalidf(format string, args ...any) *Query {
 	q.err = gcerr.Newf(gcerr.InvalidArgument, nil, format, args...)
 	return q
 }
@@ -249,7 +301,7 @@ func (it *DocumentIterator) Stop() {
 // See https://gocloud.dev/concepts/as/ for background information, the "As"
 // examples in this package for examples, and the driver package
 // documentation for the specific types supported for that driver.
-func (it *DocumentIterator) As(i interface{}) bool {
+func (it *DocumentIterator) As(i any) bool {
 	if i == nil || it.iter == nil {
 		return false
 	}

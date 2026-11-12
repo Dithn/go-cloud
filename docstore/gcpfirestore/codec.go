@@ -23,11 +23,10 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/golang/protobuf/ptypes"
-	ts "github.com/golang/protobuf/ptypes/timestamp"
+	pb "cloud.google.com/go/firestore/apiv1/firestorepb"
 	"gocloud.dev/docstore/driver"
-	pb "google.golang.org/genproto/googleapis/firestore/v1"
 	"google.golang.org/genproto/googleapis/type/latlng"
+	tspb "google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // encodeDoc encodes a driver.Document into Firestore's representation.
@@ -48,7 +47,7 @@ func encodeDoc(doc driver.Document, nameField string) (*pb.Document, error) {
 // encodeValue encodes a Go value as a Firestore Value.
 // The Firestore proto definition for Value is a oneof of various types,
 // including basic types like string as well as lists and maps.
-func encodeValue(x interface{}) (*pb.Value, error) {
+func encodeValue(x any) (*pb.Value, error) {
 	var e encoder
 	if err := driver.Encode(reflect.ValueOf(x), &e); err != nil {
 		return nil, err
@@ -63,33 +62,43 @@ type encoder struct {
 
 var nullValue = &pb.Value{ValueType: &pb.Value_NullValue{}}
 
-func (e *encoder) EncodeNil()            { e.pv = nullValue }
-func (e *encoder) EncodeBool(x bool)     { e.pv = &pb.Value{ValueType: &pb.Value_BooleanValue{x}} }
-func (e *encoder) EncodeInt(x int64)     { e.pv = &pb.Value{ValueType: &pb.Value_IntegerValue{x}} }
-func (e *encoder) EncodeUint(x uint64)   { e.pv = &pb.Value{ValueType: &pb.Value_IntegerValue{int64(x)}} }
-func (e *encoder) EncodeBytes(x []byte)  { e.pv = &pb.Value{ValueType: &pb.Value_BytesValue{x}} }
+func (e *encoder) EncodeNil() { e.pv = nullValue }
+func (e *encoder) EncodeBool(x bool) {
+	e.pv = &pb.Value{ValueType: &pb.Value_BooleanValue{BooleanValue: x}}
+}
+func (e *encoder) EncodeInt(x int64) {
+	e.pv = &pb.Value{ValueType: &pb.Value_IntegerValue{IntegerValue: x}}
+}
+func (e *encoder) EncodeUint(x uint64) {
+	e.pv = &pb.Value{ValueType: &pb.Value_IntegerValue{IntegerValue: int64(x)}}
+}
+func (e *encoder) EncodeBytes(x []byte) {
+	e.pv = &pb.Value{ValueType: &pb.Value_BytesValue{BytesValue: x}}
+}
 func (e *encoder) EncodeFloat(x float64) { e.pv = floatval(x) }
-func (e *encoder) EncodeString(x string) { e.pv = &pb.Value{ValueType: &pb.Value_StringValue{x}} }
+func (e *encoder) EncodeString(x string) {
+	e.pv = &pb.Value{ValueType: &pb.Value_StringValue{StringValue: x}}
+}
 
 func (e *encoder) ListIndex(int) { panic("impossible") }
 func (e *encoder) MapKey(string) { panic("impossible") }
 
 func (e *encoder) EncodeList(n int) driver.Encoder {
 	s := make([]*pb.Value, n)
-	e.pv = &pb.Value{ValueType: &pb.Value_ArrayValue{&pb.ArrayValue{Values: s}}}
+	e.pv = &pb.Value{ValueType: &pb.Value_ArrayValue{ArrayValue: &pb.ArrayValue{Values: s}}}
 	return &listEncoder{s: s}
 }
 
 func (e *encoder) EncodeMap(n int) driver.Encoder {
 	m := make(map[string]*pb.Value, n)
-	e.pv = &pb.Value{ValueType: &pb.Value_MapValue{&pb.MapValue{Fields: m}}}
+	e.pv = &pb.Value{ValueType: &pb.Value_MapValue{MapValue: &pb.MapValue{Fields: m}}}
 	return &mapEncoder{m: m}
 }
 
 var (
-	typeOfGoTime         = reflect.TypeOf(time.Time{})
-	typeOfProtoTimestamp = reflect.TypeOf((*ts.Timestamp)(nil))
-	typeOfLatLng         = reflect.TypeOf((*latlng.LatLng)(nil))
+	typeOfGoTime         = reflect.TypeFor[time.Time]()
+	typeOfProtoTimestamp = reflect.TypeFor[*tspb.Timestamp]()
+	typeOfLatLng         = reflect.TypeFor[*latlng.LatLng]()
 )
 
 // Encode time.Time, latlng.LatLng, and ts.Timestamp specially, because the Go Firestore
@@ -97,24 +106,21 @@ var (
 func (e *encoder) EncodeSpecial(v reflect.Value) (bool, error) {
 	switch v.Type() {
 	case typeOfGoTime:
-		ts, err := ptypes.TimestampProto(v.Interface().(time.Time))
-		if err != nil {
-			return false, err
-		}
-		e.pv = &pb.Value{ValueType: &pb.Value_TimestampValue{ts}}
+		ts := tspb.New(v.Interface().(time.Time))
+		e.pv = &pb.Value{ValueType: &pb.Value_TimestampValue{TimestampValue: ts}}
 		return true, nil
 	case typeOfProtoTimestamp:
 		if v.IsNil() {
 			e.pv = nullValue
 		} else {
-			e.pv = &pb.Value{ValueType: &pb.Value_TimestampValue{v.Interface().(*ts.Timestamp)}}
+			e.pv = &pb.Value{ValueType: &pb.Value_TimestampValue{TimestampValue: v.Interface().(*tspb.Timestamp)}}
 		}
 		return true, nil
 	case typeOfLatLng:
 		if v.IsNil() {
 			e.pv = nullValue
 		} else {
-			e.pv = &pb.Value{ValueType: &pb.Value_GeoPointValue{v.Interface().(*latlng.LatLng)}}
+			e.pv = &pb.Value{ValueType: &pb.Value_GeoPointValue{GeoPointValue: v.Interface().(*latlng.LatLng)}}
 		}
 		return true, nil
 	default:
@@ -136,7 +142,9 @@ type mapEncoder struct {
 
 func (e *mapEncoder) MapKey(k string) { e.m[k] = e.pv }
 
-func floatval(x float64) *pb.Value { return &pb.Value{ValueType: &pb.Value_DoubleValue{x}} }
+func floatval(x float64) *pb.Value {
+	return &pb.Value{ValueType: &pb.Value_DoubleValue{DoubleValue: x}}
+}
 
 ////////////////////////////////////////////////////////////////
 
@@ -148,7 +156,7 @@ func decodeDoc(pdoc *pb.Document, ddoc driver.Document, nameField, revField stri
 	if nameField != "" {
 		pdoc.Fields[nameField] = &pb.Value{ValueType: &pb.Value_StringValue{StringValue: path.Base(pdoc.Name)}}
 	}
-	mv := &pb.Value{ValueType: &pb.Value_MapValue{&pb.MapValue{Fields: pdoc.Fields}}}
+	mv := &pb.Value{ValueType: &pb.Value_MapValue{MapValue: &pb.MapValue{Fields: pdoc.Fields}}}
 	if err := ddoc.Decode(decoder{mv}); err != nil {
 		return err
 	}
@@ -215,11 +223,11 @@ func (d decoder) AsBytes() ([]byte, bool) {
 }
 
 // AsInterface decodes the value in d into the most appropriate Go type.
-func (d decoder) AsInterface() (interface{}, error) {
+func (d decoder) AsInterface() (any, error) {
 	return decodeValue(d.pv)
 }
 
-func decodeValue(v *pb.Value) (interface{}, error) {
+func decodeValue(v *pb.Value) (any, error) {
 	switch v := v.ValueType.(type) {
 	case *pb.Value_NullValue:
 		return nil, nil
@@ -235,11 +243,7 @@ func decodeValue(v *pb.Value) (interface{}, error) {
 		return v.BytesValue, nil
 	case *pb.Value_TimestampValue:
 		// Return TimestampValue as time.Time.
-		t, err := ptypes.Timestamp(v.TimestampValue)
-		if err != nil {
-			return nil, err
-		}
-		return t, nil
+		return v.TimestampValue.AsTime(), nil
 	case *pb.Value_ReferenceValue:
 		// TODO(jba): support references
 		return nil, errors.New("references are not currently supported")
@@ -247,7 +251,7 @@ func decodeValue(v *pb.Value) (interface{}, error) {
 		// Return GeoPointValue as *latlng.LatLng.
 		return v.GeoPointValue, nil
 	case *pb.Value_ArrayValue:
-		s := make([]interface{}, len(v.ArrayValue.Values))
+		s := make([]any, len(v.ArrayValue.Values))
 		for i, pv := range v.ArrayValue.Values {
 			e, err := decodeValue(pv)
 			if err != nil {
@@ -257,7 +261,7 @@ func decodeValue(v *pb.Value) (interface{}, error) {
 		}
 		return s, nil
 	case *pb.Value_MapValue:
-		m := make(map[string]interface{}, len(v.MapValue.Fields))
+		m := make(map[string]any, len(v.MapValue.Fields))
 		for k, pv := range v.MapValue.Fields {
 			e, err := decodeValue(pv)
 			if err != nil {
@@ -285,6 +289,7 @@ func (d decoder) DecodeList(f func(int, driver.Decoder) bool) {
 		}
 	}
 }
+
 func (d decoder) MapLen() (int, bool) {
 	m := d.pv.GetMapValue()
 	if m == nil {
@@ -292,6 +297,7 @@ func (d decoder) MapLen() (int, bool) {
 	}
 	return len(m.Fields), true
 }
+
 func (d decoder) DecodeMap(f func(string, driver.Decoder, bool) bool) {
 	for k, v := range d.pv.GetMapValue().Fields {
 		if !f(k, decoder{v}, true) {
@@ -300,15 +306,14 @@ func (d decoder) DecodeMap(f func(string, driver.Decoder, bool) bool) {
 	}
 }
 
-func (d decoder) AsSpecial(v reflect.Value) (bool, interface{}, error) {
+func (d decoder) AsSpecial(v reflect.Value) (bool, any, error) {
 	switch v.Type() {
 	case typeOfGoTime:
 		if ts, ok := d.pv.ValueType.(*pb.Value_TimestampValue); ok {
 			if ts.TimestampValue == nil {
 				return true, time.Time{}, nil
 			}
-			t, err := ptypes.Timestamp(ts.TimestampValue)
-			return true, t, err
+			return true, ts.TimestampValue.AsTime(), nil
 		}
 		return true, nil, fmt.Errorf("expected TimestampValue for time.Time, got %+v", d.pv.ValueType)
 	case typeOfProtoTimestamp:

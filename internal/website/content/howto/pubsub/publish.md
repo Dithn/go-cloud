@@ -48,7 +48,7 @@ for URL usage for each supported service.
 
 Alternatively, if you need fine-grained
 control over the connection settings, you can call the constructor function in
-the driver package directly (like `gcppubsub.OpenTopic`).
+the driver package directly (like `gcppubsubv2.OpenTopic`).
 
 ```go
 import "gocloud.dev/pubsub/<driver>"
@@ -104,18 +104,18 @@ alternatives, including using environment variables.
 [GCP creds]: https://cloud.google.com/docs/authentication/production
 [`gcloud auth application-default login`]: https://cloud.google.com/sdk/gcloud/reference/auth/application-default/login
 
-{{< goexample "gocloud.dev/pubsub/gcppubsub.Example_openTopicFromURL" >}}
+{{< goexample "gocloud.dev/pubsub/gcppubsubv2.Example_openTopicFromURL" >}}
 
 #### Google Cloud Pub/Sub Constructor {#gcp-ctor}
 
-The [`gcppubsub.OpenTopic`][] constructor opens a Cloud Pub/Sub topic. You
+The [`gcppubsubv2.OpenTopic`][] constructor opens a Cloud Pub/Sub topic. You
 must first obtain [GCP credentials][GCP creds] and then create a gRPC
 connection to Cloud Pub/Sub. (This gRPC connection can be reused among
 topics.)
 
-{{< goexample "gocloud.dev/pubsub/gcppubsub.ExampleOpenTopic" >}}
+{{< goexample "gocloud.dev/pubsub/gcppubsubv2.ExampleOpenTopic" >}}
 
-[`gcppubsub.OpenTopic`]: https://godoc.org/gocloud.dev/pubsub/gcppubsub#OpenTopic
+[`gcppubsubv2.OpenTopic`]: https://godoc.org/gocloud.dev/pubsub/gcppubsubv2#OpenTopic
 
 ### Amazon Simple Notification Service {#sns}
 
@@ -126,12 +126,7 @@ application connects to the correct region.
 
 [SNS]: https://aws.amazon.com/sns/
 
-`pubsub.OpenTopic` will create a default AWS Session with the
-`SharedConfigEnable` option enabled; if you have authenticated with the AWS CLI,
-it will use those credentials. See [AWS Session][] to learn about authentication
-alternatives, including using environment variables.
-
-[AWS Session]: https://docs.aws.amazon.com/sdk-for-go/api/aws/session/
+It will create an AWS Config based on the AWS SDK V2; see [AWS V2 Config][] to learn more.
 
 {{< goexample "gocloud.dev/pubsub/awssnssqs.Example_openSNSTopicFromURL" >}}
 
@@ -145,16 +140,16 @@ you may need to manually Base64 decode the message payload.
 
 [Base64]: https://en.wikipedia.org/wiki/Base64
 [SQS Subscribe]: {{< relref "./subscribe.md#sqs" >}}
+[AWS V2 Config]: https://aws.github.io/aws-sdk-go-v2/docs/configuring-sdk/
 
 #### Amazon SNS Constructor {#sns-ctor}
 
 The [`awssnssqs.OpenSNSTopic`][] constructor opens an SNS topic. You must first
-create an [AWS session][] with the same region as your topic:
+create an AWS Config with the same region as your topic:
 
 {{< goexample "gocloud.dev/pubsub/awssnssqs.ExampleOpenSNSTopic" >}}
 
 [`awssnssqs.OpenSNSTopic`]: https://godoc.org/gocloud.dev/pubsub/awssnssqs#OpenSNSTopic
-[AWS session]: https://docs.aws.amazon.com/sdk-for-go/api/aws/session/
 
 ### Amazon Simple Queue Service {#sqs}
 
@@ -182,16 +177,15 @@ you may need to manually Base64 decode the message payload.
 #### Amazon SQS Constructor {#sqs-ctor}
 
 The [`awssnssqs.OpenSQSTopic`][] constructor opens an SQS topic. You must first
-create an [AWS session][] with the same region as your topic:
+create an AWS Config with the same region as your topic:
 
 {{< goexample "gocloud.dev/pubsub/awssnssqs.ExampleOpenSQSTopic" >}}
 
 [`awssnssqs.OpenSQSTopic`]: https://godoc.org/gocloud.dev/pubsub/awssnssqs#OpenSQSTopic
-[AWS session]: https://docs.aws.amazon.com/sdk-for-go/api/aws/session/
 
 ### Azure Service Bus {#azure}
 
-The Go CDK can publish to an [Azure Service Bus][] topic over [AMQP 1.0][].
+The Go CDK can publish to an [Azure Service Bus][] topic.
 The URL for publishing is the topic name. `pubsub.OpenTopic` will use the
 environment variable `SERVICEBUS_CONNECTION_STRING` to obtain the Service Bus
 connection string. The connection string can be obtained
@@ -199,7 +193,6 @@ connection string. The connection string can be obtained
 
 {{< goexample "gocloud.dev/pubsub/azuresb.Example_openTopicFromURL" >}}
 
-[AMQP 1.0]: https://www.amqp.org/
 [Azure connection string]: https://docs.microsoft.com/en-us/azure/service-bus-messaging/service-bus-dotnet-how-to-use-topics-subscriptions#get-the-connection-string
 [Azure Service Bus]: https://azure.microsoft.com/en-us/services/service-bus/
 
@@ -213,7 +206,7 @@ then pass it to `azuresb.OpenTopic`. There are also helper functions in the
 {{< goexample "gocloud.dev/pubsub/azuresb.ExampleOpenTopic" >}}
 
 [`azuresb.OpenTopic`]: https://godoc.org/gocloud.dev/pubsub/azuresb#OpenTopic
-[Azure Service Bus library]: https://github.com/Azure/azure-service-bus-go
+[Azure Service Bus library]: https://pkg.go.dev/github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus
 
 ### RabbitMQ {#rabbitmq}
 
@@ -234,7 +227,7 @@ must first create an [`*amqp.Connection`][] to your RabbitMQ instance.
 
 {{< goexample "gocloud.dev/pubsub/rabbitpubsub.ExampleOpenTopic" >}}
 
-[`*amqp.Connection`]: https://godoc.org/github.com/streadway/amqp#Connection
+[`*amqp.Connection`]: https://pkg.go.dev/github.com/rabbitmq/amqp091-go#Connection
 [`rabbitpubsub.OpenTopic`]: https://godoc.org/gocloud.dev/pubsub/rabbitpubsub#OpenTopic
 
 ### NATS {#nats}
@@ -285,7 +278,7 @@ you started.
 
 {{< goexample "gocloud.dev/pubsub/kafkapubsub.ExampleOpenTopic" >}}
 
-[`*sarama.Config`]: https://godoc.org/github.com/Shopify/sarama#Config
+[`*sarama.Config`]: https://godoc.org/github.com/IBM/sarama#Config
 [`kafkapubsub.OpenTopic`]: https://godoc.org/gocloud.dev/pubsub/kafkapubsub#OpenTopic
 [`kafkapubsub.MinimalConfig`]: https://godoc.org/gocloud.dev/pubsub/kafkapubsub#MinimalConfig
 

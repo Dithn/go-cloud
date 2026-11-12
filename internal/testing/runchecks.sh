@@ -44,9 +44,11 @@ rootdir="$(pwd)"
 # new Go version. Some checks below we only run
 # for the latest Go version.
 latest_go_version=0
-if [[ $(go version) == *go1\.17* ]]; then
+go_version=$(go version)
+if [[ ${go_version} == *go1\.27* ]]; then
   latest_go_version=1
 fi
+echo "Go Version: ${go_version}; latest=${latest_go_version}"
 
 # Build the test-summary app, which is used inside the loop to summarize results
 # from Go tests.
@@ -67,23 +69,27 @@ while read -r path || [[ -n "$path" ]]; do
   fi
 
   gotestflags=("-json" "-race")
-  testsummaryflags=("-progress")
+  testsummaryflags=("--verbose")
 
-  # Only do coverage for the Linux build because it is slow, and
-  # codecov will only save the last one anyway.
-  if [[ "${RUNNER_OS:-}" == "Linux" ]]; then
-    gotestflags+=("-coverpkg=./..." "-coverprofile=$rootdir/modcoverage.out")
-  fi
-
-  # Previous versions of the "go" command may have
-  # different opinions about what go.mod should look
-  # like.
   if [[ $latest_go_version -eq 1 ]]; then
+    # Only do coverage for the latest Linux build because it is slow, and
+    # codecov will only save the last one anyway.
+    if [[ "${RUNNER_OS:-}" == "Linux" ]]; then
+      gotestflags+=("-coverpkg=./..." "-coverprofile=$rootdir/modcoverage.out")
+    fi
+    # Previous versions of the "go" command may have
+    # different opinions about what go.mod should look
+    # like.
     gotestflags+=("-mod=readonly")
   fi
 
   # Run the tests.
-  (cd "$path" && go test "${gotestflags[@]}" ./...) | ./internal/testing/test-summary/test-summary "${testsummaryflags[@]}" || result=1
+  test_result=0
+  (cd "$path" && go test "${gotestflags[@]}" ./...) | ./internal/testing/test-summary/test-summary "${testsummaryflags[@]}" || test_result=1
+  if [ ${test_result} -eq 1 ]; then
+    echo "*** GoCDK presubmit failure: tests for $path"
+    result=1
+  fi
   if [ -f modcoverage.out ] && [ $result -eq 0 ]; then
     cat modcoverage.out >> coverage.out
     rm modcoverage.out
@@ -91,15 +97,6 @@ while read -r path || [[ -n "$path" ]]; do
 done < <( sed -e '/^#/d' -e '/^$/d' allmodules | awk '{print $1}' )
 # The above filters out comments and empty lines from allmodules and only takes
 # the first (whitespace-separated) field from each line.
-
-# Upload cumulative coverage data if we generated it.
-if [ -f coverage.out ] && [ $result -eq 0 ]; then
-  # Filter out test packages.
-  grep -v test coverage.out > coverage2.out
-  mv coverage2.out coverage.out
-  bash <(curl -s https://codecov.io/bash)
-  rm coverage.out
-fi
 
 # The rest of these checks are not OS-specific, so we only run them for the
 # Linux build, or when running locally.
@@ -115,7 +112,7 @@ if [[ ${latest_go_version} -eq 1 ]]; then
   echo
   while read -r path || [[ -n "$path" ]]; do
     echo "Module: $path"
-    ( cd "$path" && "$rootdir"/internal/testing/check_mod_tidy.sh && echo "  OK" ) || { echo "FAIL: please run ./internal/testing/gomodcleanup.sh" && result=1; }
+    ( cd "$path" && "$rootdir"/internal/testing/check_mod_tidy.sh && echo "  OK" ) || { echo "*** GoCDK presubmit failure: please run ./internal/testing/gomodcleanup.sh" && tidy_result=1; }
   done < <( sed -e '/^#/d' -e '/^$/d' allmodules | awk '{print $1}' )
   # The above filters out comments and empty lines from allmodules and only takes
   # the first (whitespace-separated) field from each line.
@@ -133,7 +130,7 @@ if [[ ${latest_go_version} -eq 1 ]]; then
   echo
   while read -r path || [[ -n "$path" ]]; do
     echo "Module: $path"
-    ( cd "$path" && wire diff ./... && echo "  OK" ) || { echo "FAIL: wire diff found diffs!" && result=1; }
+    ( cd "$path" && wire diff ./... && echo "  OK" ) || { echo "*** GoCDK presubmit failure: wire diff found diffs!" && wire_result=1; }
   done < <( sed -e '/^#/d' -e '/^$/d' allmodules | awk '{print $1}' )
   # The above filters out comments and empty lines from allmodules and only takes
   # the first (whitespace-separated) field from each line.
@@ -148,7 +145,7 @@ if [[ ${latest_go_version} -eq 1 ]]; then
   echo "Ensuring .go files are formatted with gofmt -s..."
   DIFF="$(gofmt -s -d .)"
   if [ -n "$DIFF" ]; then
-    echo "FAIL: please run 'gofmt -s -w .' and commit the result"
+    echo "*** GoCDK presubmit failure: please run 'gofmt -s -w .' and commit the result"
     echo "$DIFF";
     exit 1;
   else
@@ -160,7 +157,7 @@ if [[ ${latest_go_version} -eq 1 ]]; then
   echo
   echo "Ensuring that there are no dependencies not listed in ./internal/testing/alldeps..."
   ( ./internal/testing/listdeps.sh | diff -u ./internal/testing/alldeps - && echo "  OK" ) || {
-    echo "FAIL: dependencies changed; run: internal/testing/listdeps.sh > internal/testing/alldeps" && result=1
+    echo "*** GoCDK presubmit failure: dependencies changed; run: internal/testing/listdeps.sh > internal/testing/alldeps" && result=1
     # Module behavior may differ across versions.
     echo "using the most recent go version."
   }
@@ -172,7 +169,7 @@ if [[ ${latest_go_version} -eq 1 ]]; then
   echo "Ensuring that any new packages have the corresponding entries in Hugo..."
   missing_packages="$(internal/website/listnewpkgs.sh)"
   if ! [[ -z "$missing_packages" ]]; then
-    echo "FAIL: missing package meta tags for:" 1>&2
+    echo "*** GoCDK presubmit failure: missing package meta tags for:" 1>&2
     echo "$missing_packages" 1>&2
     result=1
   else
@@ -182,26 +179,17 @@ if [[ ${latest_go_version} -eq 1 ]]; then
   echo
   echo "Ensuring that all examples used in Hugo match what's in source..."
   (internal/website/gatherexamples/run.sh | diff -u internal/website/data/examples.json - > /dev/null && echo "  OK") || {
-    echo "FAIL: examples changed; run: internal/website/gatherexamples/run.sh > internal/website/data/examples.json"
+    echo "*** GoCDK presubmit failure: examples changed; run: internal/website/gatherexamples/run.sh > internal/website/data/examples.json"
     result=1
   }
 fi;
-
-
-# For pull requests, check if there are undeclared incompatible API changes.
-# Skip this if we're already going to fail since it is expensive.
-# CURRENTLY BROKEN
-# if [[ ${latest_go_version} -eq 1 ]] && [[ ${result} -eq 0 ]] && [[ ! -z "${GITHUB_HEAD_REF:-}" ]]; then
-  # echo
-  # ./internal/testing/check_api_change.sh || result=1;
-# fi
 
 
 echo
 if [[ ${result} -eq 0 ]]; then
   echo "SUCCESS!"
 else
-  echo "FAILED; see above for more info."
+  echo "FAILED; search for 'GoCDK presubmit failure' for more info."
 fi
 
 exit $result

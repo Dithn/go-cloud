@@ -15,17 +15,19 @@
 package blob_test
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"os"
 
 	"cloud.google.com/go/storage"
-	"github.com/aws/aws-sdk-go/aws/awserr"
+	"github.com/aws/smithy-go"
 	"gocloud.dev/blob"
 	"gocloud.dev/blob/fileblob"
+
 	_ "gocloud.dev/blob/gcsblob"
 	_ "gocloud.dev/blob/s3blob"
 )
@@ -41,7 +43,7 @@ func ExampleBucket_NewReader() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 	// Readers also have a limited view of the blob's metadata.
 	fmt.Println("Content-Type:", r.ContentType())
 	fmt.Println()
@@ -62,9 +64,31 @@ func ExampleBucket_NewRangeReader() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 	// Copy from the read range to stdout.
 	if _, err := io.Copy(os.Stdout, r); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func ExampleBucket_Download() {
+	// PRAGMA: This example is used on gocloud.dev; PRAGMA comments adjust how it is shown and can be ignored.
+	// PRAGMA: On gocloud.dev, hide lines until the next blank line.
+	ctx := context.Background()
+	var bucket *blob.Bucket
+
+	// Create a local file to download into.
+	f, err := os.Create("foo.txt")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+
+	// Download the key "foo.txt" into f. Because *os.File is an io.WriterAt,
+	// some drivers (e.g. S3) download it in parallel, which can be
+	// significantly faster for large blobs. Drivers that don't support this
+	// fall back to a single sequential stream.
+	if err := bucket.Download(ctx, "foo.txt", f, nil); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -114,7 +138,7 @@ func ExampleBucket_NewWriter_cancel() {
 		// First cancel the context.
 		cancelWrite()
 		// You must still close the writer to avoid leaking resources.
-		w.Close()
+		_ = w.Close()
 	}
 }
 
@@ -139,7 +163,7 @@ func Example() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer bucket.Close()
+	defer func() { _ = bucket.Close() }()
 
 	// We now have a *blob.Bucket! We can write our application using the
 	// *blob.Bucket type, and have the freedom to change the initialization code
@@ -162,7 +186,7 @@ func Example() {
 
 func ExampleBucket_ErrorAs() {
 	// This example is specific to the s3blob implementation; it demonstrates
-	// access to the underlying awserr.Error type.
+	// access to the underlying smithy.APIError type.
 	// The types exposed for ErrorAs by s3blob are documented in
 	// https://godoc.org/gocloud.dev/blob/s3blob#hdr-As
 
@@ -172,13 +196,17 @@ func ExampleBucket_ErrorAs() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	_, err = b.ReadAll(ctx, "nosuchfile")
 	if err != nil {
-		var awsErr awserr.Error
+		var awsErr smithy.APIError
 		if b.ErrorAs(err, &awsErr) {
-			fmt.Println(awsErr.Code())
+			fmt.Println(awsErr.ErrorCode())
+		}
+		// Alternatively, using the Go built-in errors package:
+		if errors.As(err, &awsErr) {
+			fmt.Println(awsErr.ErrorCode())
 		}
 	}
 }
@@ -194,11 +222,11 @@ func ExampleBucket_List() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer bucket.Close()
+	defer func() { _ = bucket.Close() }()
 
 	// Create some blob objects for listing: "foo[0..4].txt".
 	ctx := context.Background()
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if err := bucket.WriteAll(ctx, fmt.Sprintf("foo%d.txt", i), []byte("Go Cloud Development Kit"), nil); err != nil {
 			log.Fatal(err)
 		}
@@ -207,9 +235,9 @@ func ExampleBucket_List() {
 	// Iterate over them.
 	// This will list the blobs created above because fileblob is strongly
 	// consistent, but is not guaranteed to work on all services.
-	iter := bucket.List(nil)
+	li := bucket.List(nil)
 	for {
-		obj, err := iter.Next(ctx)
+		obj, err := li.Next(ctx)
 		if err == io.EOF {
 			break
 		}
@@ -219,12 +247,35 @@ func ExampleBucket_List() {
 		fmt.Println(obj.Key)
 	}
 
+	// Alternatively, use All to iterate (and optionally download):
+	fmt.Println()
+	fmt.Println("Now, using an iterator:")
+	li = bucket.List(nil)
+	iter, errFn := li.All(ctx)
+	for obj, download := range iter {
+		var buf bytes.Buffer
+		if err := download(&buf, nil /* default ReaderOptions */); err != nil {
+			log.Fatalf("download of %q failed: %v", obj.Key, err)
+		}
+		fmt.Printf("%s: %s\n", obj.Key, string(buf.Bytes()))
+	}
+	if err := errFn(); err != nil {
+		log.Fatalf("iteration failed: %v", err)
+	}
+
 	// Output:
 	// foo0.txt
 	// foo1.txt
 	// foo2.txt
 	// foo3.txt
 	// foo4.txt
+	//
+	// Now, using an iterator:
+	// foo0.txt: Go Cloud Development Kit
+	// foo1.txt: Go Cloud Development Kit
+	// foo2.txt: Go Cloud Development Kit
+	// foo3.txt: Go Cloud Development Kit
+	// foo4.txt: Go Cloud Development Kit
 }
 
 func ExampleBucket_List_withDelimiter() {
@@ -238,7 +289,7 @@ func ExampleBucket_List_withDelimiter() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer bucket.Close()
+	defer func() { _ = bucket.Close() }()
 
 	// Create some blob objects in a hierarchy.
 	ctx := context.Background()
@@ -300,11 +351,11 @@ func ExampleBucket_ListPage() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer bucket.Close()
+	defer func() { _ = bucket.Close() }()
 
 	// Create some blob objects for listing: "foo[0..7].txt".
 	ctx := context.Background()
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		if err := bucket.WriteAll(ctx, fmt.Sprintf("foo%d.txt", i), []byte("Go Cloud Development Kit"), nil); err != nil {
 			log.Fatal(err)
 		}
@@ -375,7 +426,7 @@ func ExampleBucket_As() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	// Access storage.Client fields via gcsClient here.
 	var gcsClient *storage.Client
@@ -402,9 +453,9 @@ func ExampleWriterOptions() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
-	beforeWrite := func(as func(interface{}) bool) error {
+	beforeWrite := func(as func(any) bool) error {
 		var sw *storage.Writer
 		if as(&sw) {
 			fmt.Println(sw.ChunkSize)
@@ -430,7 +481,7 @@ func ExampleListObject_As() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	iter := b.List(nil)
 	for {
@@ -461,9 +512,9 @@ func ExampleListOptions() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
-	beforeList := func(as func(interface{}) bool) error {
+	beforeList := func(as func(any) bool) error {
 		// Access storage.Query via q here.
 		var q *storage.Query
 		if as(&q) {
@@ -497,9 +548,25 @@ func ExamplePrefixedBucket() {
 
 	// The original bucket is no longer usable; it has been closed.
 	// The wrapped bucket should be closed when done.
-	defer bucket.Close()
+	defer func() { _ = bucket.Close() }()
 
 	// Bucket operations on <key> will be translated to "a/subfolder/<key>".
+}
+
+func ExampleSingleKeyBucket() {
+	// PRAGMA: This example is used on gocloud.dev; PRAGMA comments adjust how it is shown and can be ignored.
+	// PRAGMA: On gocloud.dev, hide lines until the next blank line.
+	var bucket *blob.Bucket
+
+	// Wrap the bucket using blob.SingleKeyBucket.
+	// The bucket always references the provided key.
+	bucket = blob.SingleKeyBucket(bucket, "foo.txt")
+
+	// The original bucket is no longer usable; it has been closed.
+	// The wrapped bucket should be closed when done.
+	defer func() { _ = bucket.Close() }()
+
+	// Bucket operations will ignore the passed-in key and always reference foo.txt.
 }
 
 func ExampleReader_As() {
@@ -514,13 +581,13 @@ func ExampleReader_As() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	r, err := b.NewReader(ctx, "gopher.png", nil)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	// Access storage.Reader via sr here.
 	var sr *storage.Reader
@@ -540,7 +607,7 @@ func ExampleAttributes_As() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	attrs, err := b.Attributes(ctx, "gopher.png")
 	if err != nil {
@@ -554,9 +621,9 @@ func ExampleAttributes_As() {
 }
 
 func newTempDir() (string, func()) {
-	dir, err := ioutil.TempDir("", "go-cloud-blob-example")
+	dir, err := os.MkdirTemp("", "go-cloud-blob-example")
 	if err != nil {
 		panic(err)
 	}
-	return dir, func() { os.RemoveAll(dir) }
+	return dir, func() { _ = os.RemoveAll(dir) }
 }

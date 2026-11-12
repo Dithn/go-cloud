@@ -72,11 +72,11 @@ func TestSequential(t *testing.T) {
 	ctx := context.Background()
 	var got []int
 	e := errors.New("e")
-	b := batcher.New(reflect.TypeOf(int(0)), nil, func(items interface{}) error {
+	b := batcher.New(reflect.TypeFor[int](), nil, func(items any) error {
 		got = items.([]int)
 		return e
 	})
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		err := b.Add(ctx, i)
 		if err != e {
 			t.Errorf("got %v, want %v", err, e)
@@ -98,8 +98,8 @@ func (i *sizableItem) ByteSize() int {
 
 func TestPreventsAddingItemsLargerThanBatchMaxByteSize(t *testing.T) {
 	ctx := context.Background()
-	itemType := reflect.TypeOf(&sizableItem{})
-	b := batcher.New(itemType, &batcher.Options{MaxBatchByteSize: 1}, func(items interface{}) error {
+	itemType := reflect.TypeFor[*sizableItem]()
+	b := batcher.New(itemType, &batcher.Options{MaxBatchByteSize: 1}, func(items any) error {
 		return nil
 	})
 
@@ -117,7 +117,7 @@ func TestPreventsAddingItemsLargerThanBatchMaxByteSize(t *testing.T) {
 
 func TestBatchingConsidersMaxSizeAndMaxByteSize(t *testing.T) {
 	ctx := context.Background()
-	itemType := reflect.TypeOf(&sizableItem{})
+	itemType := reflect.TypeFor[*sizableItem]()
 	tests := []struct {
 		itemCount      int
 		itemSize       int
@@ -131,7 +131,7 @@ func TestBatchingConsidersMaxSizeAndMaxByteSize(t *testing.T) {
 
 	for _, test := range tests {
 		var got [][]*sizableItem
-		b := batcher.New(itemType, test.opts, func(items interface{}) error {
+		b := batcher.New(itemType, test.opts, func(items any) error {
 			got = append(got, items.([]*sizableItem))
 			return nil
 		})
@@ -157,11 +157,11 @@ func TestBatchingConsidersMaxSizeAndMaxByteSize(t *testing.T) {
 func TestMinBatchSize(t *testing.T) {
 	// Verify the MinBatchSize option works.
 	var got [][]int
-	b := batcher.New(reflect.TypeOf(int(0)), &batcher.Options{MinBatchSize: 3}, func(items interface{}) error {
+	b := batcher.New(reflect.TypeFor[int](), &batcher.Options{MinBatchSize: 3}, func(items any) error {
 		got = append(got, items.([]int))
 		return nil
 	})
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		b.AddNoWait(i)
 	}
 	b.Shutdown()
@@ -184,7 +184,7 @@ func TestSaturation(t *testing.T) {
 		maxBatch         int             // size of largest batch
 		count            = map[int]int{} // how many of each item the handlers observe
 	)
-	b := batcher.New(reflect.TypeOf(int(0)), &batcher.Options{MaxHandlers: maxHandlers, MaxBatchSize: maxBatchSize}, func(x interface{}) error {
+	b := batcher.New(reflect.TypeFor[int](), &batcher.Options{MaxHandlers: maxHandlers, MaxBatchSize: maxBatchSize}, func(x any) error {
 		items := x.([]int)
 		mu.Lock()
 		outstanding++
@@ -205,8 +205,7 @@ func TestSaturation(t *testing.T) {
 	})
 	var wg sync.WaitGroup
 	const nItems = 1000
-	for i := 0; i < nItems; i++ {
-		i := i
+	for i := range nItems {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -228,7 +227,7 @@ func TestSaturation(t *testing.T) {
 	}
 	// Check that handlers saw every item exactly once.
 	want := map[int]int{}
-	for i := 0; i < nItems; i++ {
+	for i := range nItems {
 		want[i] = 1
 	}
 	if diff := cmp.Diff(count, want); diff != "" {
@@ -240,7 +239,7 @@ func TestShutdown(t *testing.T) {
 	ctx := context.Background()
 	var nHandlers int64 // atomic
 	c := make(chan int, 10)
-	b := batcher.New(reflect.TypeOf(int(0)), &batcher.Options{MaxHandlers: cap(c)}, func(x interface{}) error {
+	b := batcher.New(reflect.TypeFor[int](), &batcher.Options{MaxHandlers: cap(c)}, func(x any) error {
 		for range x.([]int) {
 			c <- 0
 		}
@@ -271,10 +270,37 @@ func TestShutdown(t *testing.T) {
 	}
 }
 
+// TestMinBatchSizeFlushesOnShutdown ensures that Shutdown() flushes batches, even if
+// the pending count is less than the minimum batch size.
+func TestMinBatchSizeFlushesOnShutdown(t *testing.T) {
+	var got [][]int
+
+	batchSize := 3
+	b := batcher.New(reflect.TypeFor[int](), &batcher.Options{MinBatchSize: batchSize}, func(items any) error {
+		got = append(got, items.([]int))
+		return nil
+	})
+	for i := 0; i < (batchSize - 1); i++ {
+		b.AddNoWait(i)
+	}
+
+	// Ensure that we've received nothing
+	if len(got) > 0 {
+		t.Errorf("got batch unexpectedly: %+v", got)
+	}
+
+	b.Shutdown()
+
+	want := [][]int{{0, 1}}
+	if !cmp.Equal(got, want) {
+		t.Errorf("got %+v, want %+v on shutdown", got, want)
+	}
+}
+
 func TestItemCanBeInterface(t *testing.T) {
-	readerType := reflect.TypeOf([]io.Reader{}).Elem()
+	readerType := reflect.TypeFor[[]io.Reader]().Elem()
 	called := false
-	b := batcher.New(readerType, nil, func(items interface{}) error {
+	b := batcher.New(readerType, nil, func(items any) error {
 		called = true
 		_, ok := items.([]io.Reader)
 		if !ok {
@@ -282,7 +308,9 @@ func TestItemCanBeInterface(t *testing.T) {
 		}
 		return nil
 	})
-	b.Add(context.Background(), &bytes.Buffer{})
+	if err := b.Add(context.Background(), &bytes.Buffer{}); err != nil {
+		t.Errorf("failed to Add: %v", err)
+	}
 	if !called {
 		t.Fatal("handler not called")
 	}
